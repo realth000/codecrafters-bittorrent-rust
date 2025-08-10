@@ -223,6 +223,32 @@ fn decode_string(ctx: &mut DecodeContext) -> BtResult<String> {
     Ok(s.to_owned())
 }
 
+/// String "5:hello" -> "hello"
+///
+/// Like string, but contents are not valid utf8.
+fn decode_bytes(ctx: &mut DecodeContext) -> BtResult<Vec<u8>> {
+    if ctx.peek().map(|x| u8_is_digit(x)) != Some(true) {
+        bail!(BtError::InvalidString(ctx.pos()))
+    }
+
+    let col_idx = ctx
+        .position(b':')
+        .context("failed to find the end of length of string")?;
+    let string_len = ctx
+        .advance_many(col_idx)
+        .with_context(|| format!("string length hint pos {col_idx} out of range"))
+        .and_then(|x| char_slice_to_usize(x).context("invalid string length"))?;
+    // Pass the ':' character.
+    ctx.advance();
+    let s = &ctx
+        .advance_many(string_len)
+        .with_context(|| format!("string idx {} out of range", string_len))?
+        .iter()
+        .map(|x| x.to_owned())
+        .collect::<Vec<u8>>();
+    Ok(s.to_owned())
+}
+
 /// Interger "i52e" -> 52; "i-52e" -> -52
 fn decode_integer(ctx: &mut DecodeContext) -> BtResult<isize> {
     if ctx.peek() != Some(&b'i') {
@@ -302,18 +328,38 @@ fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
             _ => { /* Continue parsing map */ }
         }
 
-        let value = decode_bencoded_value(ctx)
-            .with_context(|| format!("failed to decode dictionary at {}", ctx.pos()))?;
         match state {
-            ParseState::None => match value.as_str() {
-                Some(v) => {
-                    state = ParseState::Key(v.to_string());
+            ParseState::None => {
+                let value = decode_bencoded_value(ctx)
+                    .with_context(|| format!("failed to decode dictionary at {}", ctx.pos()))?;
+                match value.as_str() {
+                    Some(v) => {
+                        state = ParseState::Key(v.to_string());
+                    }
+                    None => return Err(BtError::InvalidMapKey(ctx.pos, value).into()),
                 }
-                None => return Err(BtError::InvalidMapKey(ctx.pos, value).into()),
-            },
+            }
             ParseState::Key(k) => {
-                values.insert(k, value);
-                state = ParseState::None;
+                if k == "pieces" {
+                    let value = decode_bytes(ctx)
+                        .with_context(|| format!("failed to decode dictionary at {}", ctx.pos()))?;
+                    values.insert(
+                        k,
+                        serde_json::Value::String(value.iter().fold(
+                            String::new(),
+                            |mut acc, &byte| {
+                                acc.push_str(&format!("{:02x}", byte));
+                                acc
+                            },
+                        )),
+                    );
+                    state = ParseState::None;
+                } else {
+                    let value = decode_bencoded_value(ctx)
+                        .with_context(|| format!("failed to decode dictionary at {}", ctx.pos()))?;
+                    values.insert(k, value);
+                    state = ParseState::None;
+                }
             }
         }
     }
@@ -507,14 +553,14 @@ mod test {
     }
 
     #[test]
-    fn test_a() {
+    fn test_encoding() {
         let x = json!({
             "announce": "aaaaa",
             "info": {
                 "length": 1234,
                 "name": "name",
                 "piece length": 4567,
-                "pieces": "pieces"
+                "pieces": "pieces123213"
             }
         });
         let m = M {
@@ -523,7 +569,7 @@ mod test {
                 length: 1234,
                 name: "name".to_string(),
                 piece_length: 4567,
-                pieces: "pieces".to_string(),
+                pieces: "pieces123213".to_string(),
             },
         };
 
