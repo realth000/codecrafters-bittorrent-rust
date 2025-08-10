@@ -210,6 +210,7 @@ fn decode_list(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
             .with_context(|| format!("failed to decode list element at pos {}", ctx.pos()))?;
         values.push(value);
     }
+    ctx.advance();
 
     let ret = serde_json::Value::Array(values);
     Ok(ret)
