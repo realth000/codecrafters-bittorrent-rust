@@ -336,6 +336,7 @@ fn decode_bencoded_value(ctx: &mut DecodeContext) -> BtResult<serde_json::Value>
 /// String "5:hello" -> "hello"
 fn encode_string(ctx: &mut EncodeContext, s: &str) {
     ctx.push_usize(s.len());
+    ctx.push_char(':');
     ctx.append(s.as_bytes().to_vec());
     ctx.push_char('d');
 }
