@@ -424,11 +424,10 @@ fn encode_dictionary(ctx: &mut EncodeContext, v: &serde_json::Map<String, serde_
     for (k, v) in v.iter() {
         encode_string(ctx, k);
         if k == "pieces" {
-            let s = v.as_str().unwrap();
-            let chars = s.chars().collect::<Vec<char>>();
-            ctx.push_usize(chars.len());
+            let bs = decode_bytes_from_string(v.as_str().unwrap());
+            ctx.push_usize(bs.len());
             ctx.push_char(':');
-            ctx.append(decode_bytes_from_string(s));
+            ctx.append(bs);
         } else {
             encode_json_value(ctx, v);
         }
@@ -499,7 +498,6 @@ fn main() -> BtResult<()> {
 mod test {
     use serde::{Deserialize, Serialize};
     use serde_bytes::ByteBuf;
-    use serde_json::json;
 
     use super::*;
 
@@ -580,5 +578,13 @@ mod test {
             .unwrap();
         let bad_pieces = decode_bytes_from_string(bad_pieces);
         assert_eq!(good_pieces, bad_pieces);
+        let mut ctx2 = EncodeContext::new();
+        encode_dictionary(&mut ctx2, decoded_value.as_object().unwrap());
+        assert_eq!(&ctx.data, ctx2.data());
+        assert_eq!(
+            String::from_utf8_lossy(&ctx.data[170..200]),
+            String::from_utf8_lossy(&ctx2.data()[170..200]),
+        );
+        // panic!("{:?}\n{:?}", ctx.data, ctx2.data());
     }
 }
