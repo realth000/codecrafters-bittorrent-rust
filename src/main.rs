@@ -21,9 +21,6 @@ enum BtError {
 
     #[error("char {ch} not found from pos {pos}")]
     CharNotFound { pos: usize, ch: char },
-
-    #[error("position {0} is out of range")]
-    PositionOfOutRange(usize),
 }
 
 pub struct DecodeContext {
@@ -61,7 +58,7 @@ impl DecodeContext {
         self.pos += 1;
     }
 
-    pub fn peek(&mut self) -> Option<&char> {
+    pub fn peek(&self) -> Option<&char> {
         if self.ended() {
             return None;
         }
@@ -189,6 +186,35 @@ fn decode_integer(ctx: &mut DecodeContext) -> BtResult<isize> {
     Ok(number)
 }
 
+/// List starts with "l" and ends with "e".
+/// "l5:helloi52ee" ["hello", 52]
+///
+/// Returns a json array.
+fn decode_list(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
+    if ctx.peek() != Some(&'l') {
+        bail!(BtError::InvalidList(ctx.pos()))
+    }
+    // Pass the head of list "l".
+    ctx.advance();
+
+    let mut values = vec![];
+
+    loop {
+        match ctx.peek() {
+            Some(v) if v == &'e' => break,
+            None => break,
+            _ => { /* continue parsing list */ }
+        }
+
+        let value = decode_bencoded_value(ctx)
+            .with_context(|| format!("failed to decode list element at pos {}", ctx.pos()))?;
+        values.push(value);
+    }
+
+    let ret = serde_json::Value::Array(values);
+    Ok(ret)
+}
+
 fn decode_bencoded_value(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
     let flag = ctx.peek().context("reached the end of data")?;
     if flag.is_digit(10) {
@@ -197,6 +223,8 @@ fn decode_bencoded_value(ctx: &mut DecodeContext) -> BtResult<serde_json::Value>
     } else if flag == &'i' {
         let n = decode_integer(ctx).context("failed to decode interger")?;
         return Ok(serde_json::Value::Number(Number::from(n)));
+    } else if flag == &'l' {
+        return decode_list(ctx);
     } else {
         panic!("unsupported format");
     }
