@@ -1,5 +1,4 @@
 use anyhow::{bail, Context};
-use hex::encode;
 use serde_json::{self, Number};
 use sha1::{Digest, Sha1};
 use std::env;
@@ -119,7 +118,14 @@ impl EncodeContext {
     }
 
     pub fn push_usize(&mut self, v: usize) {
-        self.data.push(v as u8);
+        let s = v.to_string();
+        let chars = s.chars();
+        let mut x = vec![];
+        for ch in chars.into_iter().rev() {
+            x.insert(0, ch as u8);
+        }
+
+        self.data.append(&mut x);
     }
 
     pub fn append(&mut self, mut data: Vec<u8>) {
@@ -338,7 +344,6 @@ fn encode_string(ctx: &mut EncodeContext, s: &str) {
     ctx.push_usize(s.len());
     ctx.push_char(':');
     ctx.append(s.as_bytes().to_vec());
-    ctx.push_char('d');
 }
 
 /// Interger "i52e" -> 52; "i-52e" -> -52
@@ -372,7 +377,6 @@ fn encode_list(ctx: &mut EncodeContext, v: &Vec<serde_json::Value>) {
 fn encode_dictionary(ctx: &mut EncodeContext, v: &serde_json::Map<String, serde_json::Value>) {
     ctx.push_char('d');
     for (k, v) in v.iter() {
-        println!(">>> encode dictionay: {k}");
         encode_string(ctx, k);
         encode_json_value(ctx, v);
     }
@@ -429,12 +433,6 @@ fn main() -> BtResult<()> {
                 hasher.update(ctx.data.to_owned());
                 let hash = format!("{:x}", hasher.finalize());
                 println!("Info Hash: {hash}");
-
-                // println!(">>> orig: {:?}", info_map);
-                // println!(
-                //     ">>> now : {:?}",
-                //     decode_bencoded_value(&mut DecodeContext::new(ctx.data().to_owned()))
-                // );
             }
         }
     } else {
@@ -446,6 +444,9 @@ fn main() -> BtResult<()> {
 
 #[cfg(test)]
 mod test {
+    use serde::{Deserialize, Serialize};
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -488,5 +489,52 @@ mod test {
             v3.to_string(),
             String::from(r#"{"foo":{"foo":"bar","hello":52}}"#)
         );
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct M {
+        announce: String,
+        info: MInfo,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct MInfo {
+        length: usize,
+        name: String,
+        #[serde(rename = "piece length")]
+        piece_length: usize,
+        pieces: String,
+    }
+
+    #[test]
+    fn test_a() {
+        let x = json!({
+            "announce": "aaaaa",
+            "info": {
+                "length": 1234,
+                "name": "name",
+                "piece length": 4567,
+                "pieces": "pieces"
+            }
+        });
+        let m = M {
+            announce: String::from("aaaaa"),
+            info: MInfo {
+                length: 1234,
+                name: "name".to_string(),
+                piece_length: 4567,
+                pieces: "pieces".to_string(),
+            },
+        };
+
+        let good = serde_bencode::to_string(&m).unwrap();
+        let mut ctx = EncodeContext::new();
+        encode_dictionary(&mut ctx, x.as_object().unwrap());
+        let bad = ctx
+            .data()
+            .iter()
+            .map(|x| x.to_owned() as char)
+            .collect::<String>();
+        assert_eq!(good, bad);
     }
 }
