@@ -139,6 +139,10 @@ fn char_slice_to_isize(data: &[char]) -> Option<isize> {
         }
     }
 
+    if neg {
+        ret *= -1;
+    }
+
     Some(ret)
 }
 
