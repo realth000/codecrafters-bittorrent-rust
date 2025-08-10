@@ -423,9 +423,15 @@ fn main() -> BtResult<()> {
                 let mut ctx = EncodeContext::new();
                 encode_dictionary(&mut ctx, info_map);
                 let mut hasher = Sha1::new();
-                hasher.update(ctx.data);
+                hasher.update(ctx.data.to_owned());
                 let hash = format!("{:x}", hasher.finalize());
                 println!("Info Hash: {hash}");
+
+                println!(">>> orig: {:?}", info_map);
+                println!(
+                    ">>> now : {:?}",
+                    decode_bencoded_value(&mut DecodeContext::new(ctx.data().to_owned()))
+                );
             }
         }
     } else {
