@@ -346,8 +346,10 @@ fn encode_integer(ctx: &mut EncodeContext, i: isize) {
     ctx.push_char('i');
     if i < 0 {
         ctx.push_char('-');
+        ctx.push_usize(i as usize);
+    } else {
+        ctx.push_usize(i.abs() as usize);
     }
-    ctx.push_usize(i as usize);
     ctx.push_char('e');
 }
 
@@ -370,6 +372,7 @@ fn encode_list(ctx: &mut EncodeContext, v: &Vec<serde_json::Value>) {
 fn encode_dictionary(ctx: &mut EncodeContext, v: &serde_json::Map<String, serde_json::Value>) {
     ctx.push_char('d');
     for (k, v) in v.iter() {
+        println!(">>> encode dictionay: {k}");
         encode_string(ctx, k);
         encode_json_value(ctx, v);
     }
@@ -427,11 +430,11 @@ fn main() -> BtResult<()> {
                 let hash = format!("{:x}", hasher.finalize());
                 println!("Info Hash: {hash}");
 
-                println!(">>> orig: {:?}", info_map);
-                println!(
-                    ">>> now : {:?}",
-                    decode_bencoded_value(&mut DecodeContext::new(ctx.data().to_owned()))
-                );
+                // println!(">>> orig: {:?}", info_map);
+                // println!(
+                //     ">>> now : {:?}",
+                //     decode_bencoded_value(&mut DecodeContext::new(ctx.data().to_owned()))
+                // );
             }
         }
     } else {
