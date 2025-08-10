@@ -470,12 +470,6 @@ fn main() -> BtResult<()> {
                 let announce = v.get("announce").and_then(|x| x.as_str()).unwrap();
                 let info_map = v.get("info").and_then(|x| x.as_object()).unwrap();
                 let length = info_map.get("length").and_then(|x| x.as_i64()).unwrap();
-                // let name = info_map.get("name").and_then(|x| x.as_str()).unwrap();
-                // let pieces_length = info_map
-                //     .get("piece length")
-                //     .and_then(|x| x.as_i64())
-                //     .unwrap();
-                // let pieces = info_map.get("pieces").and_then(|x| x.as_str()).unwrap();
                 println!("Tracker URL: {announce}");
                 println!("Length: {length}");
 
@@ -485,6 +479,17 @@ fn main() -> BtResult<()> {
                 hasher.update(ctx.data.to_owned());
                 let hash = hex::encode(hasher.finalize());
                 println!("Info Hash: {hash}");
+                let piece_length = info_map
+                    .get("piece length")
+                    .and_then(|x| x.as_i64())
+                    .unwrap();
+                println!("Piece Length: {}", piece_length);
+                let pieces = info_map.get("pieces").and_then(|x| x.as_str()).unwrap();
+                println!("Piece Hashs:");
+                for p in pieces.as_bytes().chunks_exact(40) {
+                    let pstr = p.iter().map(|x| x.to_owned() as char).collect::<String>();
+                    println!("{}", pstr);
+                }
             }
         }
     } else {
@@ -585,6 +590,12 @@ mod test {
             String::from_utf8_lossy(&ctx.data[170..200]),
             String::from_utf8_lossy(&ctx2.data()[170..200]),
         );
-        // panic!("{:?}\n{:?}", ctx.data, ctx2.data());
+        // let mut hash_str = String::new();
+        // for p in hex::encode(bad_pieces).as_bytes().to_vec().chunks_exact(40) {
+        //     let pstr = p.iter().map(|x| x.to_owned() as char).collect::<String>();
+        //     hash_str.push_str(pstr.as_str());
+        //     hash_str.push('\n');
+        // }
+        // panic!("{}", hash_str);
     }
 }
