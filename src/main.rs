@@ -1,5 +1,4 @@
 use anyhow::{bail, Context};
-use base64::{prelude::BASE64_STANDARD, Engine};
 use serde_json::{self, Number};
 use sha1::{Digest, Sha1};
 use std::env;
@@ -148,6 +147,14 @@ impl From<&str> for DecodeContext {
     fn from(value: &str) -> Self {
         Self::new(value.as_bytes().to_vec())
     }
+}
+
+fn encode_bytes_to_string(d: &Vec<u8>) -> String {
+    hex::encode(d)
+}
+
+fn decode_bytes_from_string(s: &str) -> Vec<u8> {
+    hex::decode(s).unwrap()
 }
 
 fn u8_is_digit(n: &u8) -> bool {
@@ -344,16 +351,7 @@ fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
                 if k == "pieces" {
                     let value = decode_bytes(ctx)
                         .with_context(|| format!("failed to decode dictionary at {}", ctx.pos()))?;
-                    values.insert(
-                        k,
-                        serde_json::Value::String(value.iter().fold(
-                            String::new(),
-                            |mut acc, &byte| {
-                                acc.push_str(&format!("{:02x}", byte));
-                                acc
-                            },
-                        )),
-                    );
+                    values.insert(k, serde_json::Value::String(encode_bytes_to_string(&value)));
                     state = ParseState::None;
                 } else {
                     let value = decode_bencoded_value(ctx)
@@ -430,10 +428,7 @@ fn encode_dictionary(ctx: &mut EncodeContext, v: &serde_json::Map<String, serde_
             let chars = s.chars().collect::<Vec<char>>();
             ctx.push_usize(chars.len());
             ctx.push_char(':');
-            for byte in chars.chunks_exact(2) {
-                ctx.push_char(byte[0]);
-                ctx.push_char(byte[1]);
-            }
+            ctx.append(decode_bytes_from_string(s));
         } else {
             encode_json_value(ctx, v);
         }
@@ -465,7 +460,6 @@ fn main() -> BtResult<()> {
     } else if command == "info" {
         let content =
             std::fs::read(&args[2]).with_context(|| format!("failed to read file from"))?;
-        panic!("{}", BASE64_STANDARD.encode(content));
         let mut ctx = DecodeContext::new(content);
         let decoded_value = decode_bencoded_value(&mut ctx)?;
         match decoded_value.as_object() {
@@ -504,6 +498,7 @@ fn main() -> BtResult<()> {
 #[cfg(test)]
 mod test {
     use serde::{Deserialize, Serialize};
+    use serde_bytes::ByteBuf;
     use serde_json::json;
 
     use super::*;
@@ -562,38 +557,28 @@ mod test {
         name: String,
         #[serde(rename = "piece length")]
         piece_length: usize,
-        pieces: String,
+        pieces: ByteBuf,
     }
 
     #[test]
-    fn test_encoding() {
-        let x = json!({
-            "announce": "aaaaa",
-            "info": {
-                "length": 1234,
-                "name": "name",
-                "piece length": 4567,
-                "pieces": "pieces123213"
-            }
-        });
-        let m = M {
-            announce: String::from("aaaaa"),
-            info: MInfo {
-                length: 1234,
-                name: "name".to_string(),
-                piece_length: 4567,
-                pieces: "pieces123213".to_string(),
-            },
-        };
-
-        let good = serde_bencode::to_string(&m).unwrap();
-        let mut ctx = EncodeContext::new();
-        encode_dictionary(&mut ctx, x.as_object().unwrap());
-        let bad = ctx
-            .data()
-            .iter()
-            .map(|x| x.to_owned() as char)
-            .collect::<String>();
-        assert_eq!(good, bad);
+    fn test_example() {
+        let raw_data = std::fs::read("data/example.torrent").unwrap();
+        let good: M = serde_bencode::from_bytes(raw_data.as_slice()).unwrap();
+        let good_pieces = good.info.pieces;
+        let mut ctx = DecodeContext::new(raw_data);
+        // data in pieces string is hexed string.
+        let decoded_value = decode_bencoded_value(&mut ctx).unwrap();
+        let bad_pieces = decoded_value
+            .as_object()
+            .unwrap()
+            .get("info")
+            .and_then(|x| x.as_object())
+            .unwrap()
+            .get("pieces")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let bad_pieces = decode_bytes_from_string(bad_pieces);
+        assert_eq!(good_pieces, bad_pieces);
     }
 }
