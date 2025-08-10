@@ -1,5 +1,7 @@
 use anyhow::{bail, Context};
+use hex::encode;
 use serde_json::{self, Number};
+use sha1::{Digest, Sha1};
 use std::env;
 use thiserror::Error;
 
@@ -100,6 +102,32 @@ impl DecodeContext {
 
     pub fn ended(&self) -> bool {
         self.pos > self.data.len() - 1
+    }
+}
+
+pub struct EncodeContext {
+    data: Vec<u8>,
+}
+
+impl EncodeContext {
+    pub fn new() -> Self {
+        Self { data: vec![] }
+    }
+
+    pub fn push_char(&mut self, v: char) {
+        self.data.push(v as u8);
+    }
+
+    pub fn push_usize(&mut self, v: usize) {
+        self.data.push(v as u8);
+    }
+
+    pub fn append(&mut self, mut data: Vec<u8>) {
+        self.data.append(&mut data);
+    }
+
+    pub fn data(&self) -> &Vec<u8> {
+        &self.data
     }
 }
 
@@ -305,6 +333,58 @@ fn decode_bencoded_value(ctx: &mut DecodeContext) -> BtResult<serde_json::Value>
     }
 }
 
+/// String "5:hello" -> "hello"
+fn encode_string(ctx: &mut EncodeContext, s: &str) {
+    ctx.push_usize(s.len());
+    ctx.append(s.as_bytes().to_vec());
+    ctx.push_char('d');
+}
+
+/// Interger "i52e" -> 52; "i-52e" -> -52
+fn encode_integer(ctx: &mut EncodeContext, i: isize) {
+    ctx.push_char('i');
+    if i < 0 {
+        ctx.push_char('-');
+    }
+    ctx.push_usize(i as usize);
+    ctx.push_char('e');
+}
+
+/// List starts with "l" and ends with "e".
+/// "l5:helloi52ee" ["hello", 52]
+fn encode_list(ctx: &mut EncodeContext, v: &Vec<serde_json::Value>) {
+    ctx.push_char('l');
+    for vv in v {
+        encode_json_value(ctx, vv);
+    }
+    ctx.push_char('e');
+}
+
+/// Dictionary
+///
+/// d<key1><value1>...<keyN><valueN>e
+/// "d3:foo3:bar5:helloi52ee" -> {"hello": 52, "foo":"bar"}
+///
+/// Key must be string and sorted.
+fn encode_dictionary(ctx: &mut EncodeContext, v: &serde_json::Map<String, serde_json::Value>) {
+    ctx.push_char('d');
+    for (k, v) in v.iter() {
+        encode_string(ctx, k);
+        encode_json_value(ctx, v);
+    }
+    ctx.push_char('e');
+}
+
+fn encode_json_value(ctx: &mut EncodeContext, v: &serde_json::Value) {
+    match v {
+        serde_json::Value::Number(number) => encode_integer(ctx, number.as_i64().unwrap() as isize),
+        serde_json::Value::String(s) => encode_string(ctx, s),
+        serde_json::Value::Array(values) => encode_list(ctx, values),
+        serde_json::Value::Object(map) => encode_dictionary(ctx, map),
+        _ => panic!("unsupported data"),
+    }
+}
+
 fn main() -> BtResult<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -328,13 +408,23 @@ fn main() -> BtResult<()> {
             }
             Some(v) => {
                 let announce = v.get("announce").and_then(|x| x.as_str()).unwrap();
-                let length = v
-                    .get("info")
-                    .and_then(|x| x.as_object())
-                    .and_then(|x| x.get("length"))
-                    .unwrap();
+                let info_map = v.get("info").and_then(|x| x.as_object()).unwrap();
+                let length = info_map.get("length").and_then(|x| x.as_i64()).unwrap();
+                // let name = info_map.get("name").and_then(|x| x.as_str()).unwrap();
+                // let pieces_length = info_map
+                //     .get("piece length")
+                //     .and_then(|x| x.as_i64())
+                //     .unwrap();
+                // let pieces = info_map.get("pieces").and_then(|x| x.as_str()).unwrap();
                 println!("Tracker URL: {announce}");
                 println!("Length: {length}");
+
+                let mut ctx = EncodeContext::new();
+                encode_dictionary(&mut ctx, info_map);
+                let mut hasher = Sha1::new();
+                hasher.update(ctx.data);
+                let hash = format!("{:x}", hasher.finalize());
+                println!("Info Hash: {hash}");
             }
         }
     } else {
