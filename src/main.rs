@@ -488,7 +488,7 @@ fn main() -> BtResult<()> {
                 encode_dictionary(&mut ctx, info_map);
                 let mut hasher = Sha1::new();
                 hasher.update(ctx.data.to_owned());
-                let hash = format!("{:x}", hasher.finalize());
+                let hash = hex::encode(hasher.finalize());
                 println!("Info Hash: {hash}");
             }
         }
