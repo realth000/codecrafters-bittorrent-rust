@@ -253,3 +253,36 @@ fn main() -> BtResult<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_decode_integer() {
+        let v = decode_bencoded_value(&mut DecodeContext::new("i52e")).unwrap();
+        assert_eq!(v.to_string(), String::from("52"));
+
+        let v2 = decode_bencoded_value(&mut DecodeContext::new("i-52e")).unwrap();
+        assert_eq!(v2.to_string(), String::from("-52"));
+
+        let v3 = decode_bencoded_value(&mut DecodeContext::new("i4294967300e")).unwrap();
+        assert_eq!(v3.to_string(), String::from("4294967300"));
+    }
+
+    #[test]
+    fn test_decode_string() {
+        let v = decode_bencoded_value(&mut DecodeContext::new("5:hello")).unwrap();
+        assert_eq!(v.to_string(), String::from(r#""hello""#));
+    }
+
+    #[test]
+    fn test_decode_list() {
+        let v = decode_bencoded_value(&mut DecodeContext::new("l5:mangoi921ee")).unwrap();
+        assert_eq!(v.to_string(), String::from(r#"["mango",921]"#));
+        let v2 = decode_bencoded_value(&mut DecodeContext::new("lli921e5:mangoee")).unwrap();
+        assert_eq!(v2.to_string(), String::from(r#"[[921,"mango"]]"#));
+        let v3 = decode_bencoded_value(&mut DecodeContext::new("lli4eei5ee")).unwrap();
+        assert_eq!(v3.to_string(), String::from(r"[[4],5]"));
+    }
+}
