@@ -424,7 +424,18 @@ fn encode_dictionary(ctx: &mut EncodeContext, v: &serde_json::Map<String, serde_
     ctx.push_char('d');
     for (k, v) in v.iter() {
         encode_string(ctx, k);
-        encode_json_value(ctx, v);
+        if k == "pieces" {
+            let s = v.as_str().unwrap();
+            let chars = s.chars().collect::<Vec<char>>();
+            ctx.push_usize(chars.len());
+            ctx.push_char(':');
+            for byte in chars.chunks_exact(2) {
+                ctx.push_char(byte[0]);
+                ctx.push_char(byte[1]);
+            }
+        } else {
+            encode_json_value(ctx, v);
+        }
     }
     ctx.push_char('e');
 }
