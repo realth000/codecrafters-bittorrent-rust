@@ -19,6 +19,12 @@ enum BtError {
     #[error("invalid list at {0}")]
     InvalidList(usize),
 
+    #[error("invalid map at {0}")]
+    InvalidMap(usize),
+
+    #[error("invalid key of map {1} at {0}")]
+    InvalidMapKey(usize, serde_json::Value),
+
     #[error("char {ch} not found from pos {pos}")]
     CharNotFound { pos: usize, ch: char },
 }
@@ -220,6 +226,54 @@ fn decode_list(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
     Ok(ret)
 }
 
+/// Dictionary
+///
+/// d<key1><value1>...<keyN><valueN>e
+/// "d3:foo3:bar5:helloi52ee" -> {"hello": 52, "foo":"bar"}
+///
+/// Key must be string and sorted.
+fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
+    if ctx.peek() != Some(&'d') {
+        bail!(BtError::InvalidMap(ctx.pos()))
+    }
+    // Pass the heading "d".
+    ctx.advance();
+
+    #[derive(PartialEq, Eq)]
+    enum ParseState {
+        None,
+        Key(String),
+    }
+
+    let mut state = ParseState::None;
+    let mut values = serde_json::Map::new();
+    loop {
+        match ctx.peek() {
+            Some(&'e') => break,
+            None => break,
+            _ => { /* Continue parsing map */ }
+        }
+
+        let value = decode_bencoded_value(ctx)
+            .with_context(|| format!("failed to decode dictionary at {}", ctx.pos()))?;
+        match state {
+            ParseState::None => match value.as_str() {
+                Some(v) => {
+                    state = ParseState::Key(v.to_string());
+                }
+                None => return Err(BtError::InvalidMapKey(ctx.pos, value).into()),
+            },
+            ParseState::Key(k) => {
+                values.insert(k, value);
+                state = ParseState::None;
+            }
+        }
+    }
+
+    let ret = serde_json::Value::Object(values);
+    Ok(ret)
+}
+
 fn decode_bencoded_value(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
     let flag = ctx.peek().context("reached the end of data")?;
     if flag.is_digit(10) {
@@ -230,6 +284,8 @@ fn decode_bencoded_value(ctx: &mut DecodeContext) -> BtResult<serde_json::Value>
         return Ok(serde_json::Value::Number(Number::from(n)));
     } else if flag == &'l' {
         return decode_list(ctx);
+    } else if flag == &'d' {
+        return decode_dictionary(ctx);
     } else {
         panic!("unsupported format");
     }
@@ -284,5 +340,19 @@ mod test {
         assert_eq!(v2.to_string(), String::from(r#"[[921,"mango"]]"#));
         let v3 = decode_bencoded_value(&mut DecodeContext::new("lli4eei5ee")).unwrap();
         assert_eq!(v3.to_string(), String::from(r"[[4],5]"));
+    }
+
+    #[test]
+    fn test_decode_dictionary() {
+        let v = decode_bencoded_value(&mut DecodeContext::new("d3:foo3:bar5:helloi52ee")).unwrap();
+        assert_eq!(v.to_string(), String::from(r#"{"foo":"bar","hello":52}"#));
+        let v2 = decode_bencoded_value(&mut DecodeContext::new("de")).unwrap();
+        assert_eq!(v2.to_string(), String::from("{}"));
+        let v3 = decode_bencoded_value(&mut DecodeContext::new("d3:food3:foo3:bar5:helloi52eee"))
+            .unwrap();
+        assert_eq!(
+            v3.to_string(),
+            String::from(r#"{"foo":{"foo":"bar","hello":52}}"#)
+        );
     }
 }
