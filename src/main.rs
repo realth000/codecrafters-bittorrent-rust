@@ -1,4 +1,5 @@
 use anyhow::{bail, Context};
+use base64::{prelude::BASE64_STANDARD, Engine};
 use serde_json::{self, Number};
 use sha1::{Digest, Sha1};
 use std::env;
@@ -464,6 +465,7 @@ fn main() -> BtResult<()> {
     } else if command == "info" {
         let content =
             std::fs::read(&args[2]).with_context(|| format!("failed to read file from"))?;
+        panic!("{}", BASE64_STANDARD.encode(content));
         let mut ctx = DecodeContext::new(content);
         let decoded_value = decode_bencoded_value(&mut ctx)?;
         match decoded_value.as_object() {
