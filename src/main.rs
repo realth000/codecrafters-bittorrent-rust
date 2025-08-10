@@ -26,30 +26,27 @@ enum BtError {
     InvalidMapKey(usize, serde_json::Value),
 
     #[error("char {ch} not found from pos {pos}")]
-    CharNotFound { pos: usize, ch: char },
+    CharNotFound { pos: usize, ch: u8 },
 }
 
 pub struct DecodeContext {
     /// The raw data to decode.
-    data: Vec<char>,
+    data: Vec<u8>,
 
     /// Index of [data] currently decoding.
     pos: usize,
 }
 
 impl DecodeContext {
-    pub fn new(data: &str) -> Self {
-        Self {
-            data: data.chars().collect(),
-            pos: 0,
-        }
+    pub fn new(data: Vec<u8>) -> Self {
+        Self { data, pos: 0 }
     }
 
     pub fn pos(&self) -> usize {
         self.pos
     }
 
-    pub fn position(&self, ch: char) -> BtResult<usize> {
+    pub fn position(&self, ch: u8) -> BtResult<usize> {
         if self.ended() {
             bail!(BtError::Ended)
         }
@@ -64,7 +61,7 @@ impl DecodeContext {
         self.pos += 1;
     }
 
-    pub fn peek(&self) -> Option<&char> {
+    pub fn peek(&self) -> Option<&u8> {
         if self.ended() {
             return None;
         }
@@ -72,7 +69,7 @@ impl DecodeContext {
         Some(&self.data[self.pos])
     }
 
-    pub fn next(&mut self) -> Option<&char> {
+    pub fn next(&mut self) -> Option<&u8> {
         if self.ended() {
             return None;
         }
@@ -81,7 +78,7 @@ impl DecodeContext {
         return Some(ch);
     }
 
-    pub fn advance_many(&mut self, step: usize) -> Option<&[char]> {
+    pub fn advance_many(&mut self, step: usize) -> Option<&[u8]> {
         if self.ended() || self.pos + step > self.data.len() {
             return None;
         }
@@ -91,7 +88,7 @@ impl DecodeContext {
         Some(ret)
     }
 
-    pub fn advance_to(&mut self, end: usize) -> Option<&[char]> {
+    pub fn advance_to(&mut self, end: usize) -> Option<&[u8]> {
         if self.ended() || end > self.data.len() {
             return None;
         }
@@ -106,11 +103,27 @@ impl DecodeContext {
     }
 }
 
-fn char_slice_to_usize(data: &[char]) -> Option<usize> {
+impl From<String> for DecodeContext {
+    fn from(value: String) -> Self {
+        Self::new(value.as_bytes().to_vec())
+    }
+}
+
+impl From<&str> for DecodeContext {
+    fn from(value: &str) -> Self {
+        Self::new(value.as_bytes().to_vec())
+    }
+}
+
+fn u8_is_digit(n: &u8) -> bool {
+    n >= &b'0' && n <= &b'9'
+}
+
+fn char_slice_to_usize(data: &[u8]) -> Option<usize> {
     let mut ret = 0;
 
     for (idx, d) in data.iter().rev().enumerate() {
-        if d.is_digit(10) {
+        if u8_is_digit(d) {
             ret += (d.to_owned() as usize - 48) * 10_usize.pow(idx as u32);
         } else {
             return None;
@@ -120,9 +133,9 @@ fn char_slice_to_usize(data: &[char]) -> Option<usize> {
     Some(ret)
 }
 
-fn char_slice_to_isize(data: &[char]) -> Option<isize> {
+fn char_slice_to_isize(data: &[u8]) -> Option<isize> {
     let mut ret = 0;
-    let neg = if let Some('-') = data.iter().next() {
+    let neg = if let Some(b'-') = data.iter().next() {
         true
     } else {
         false
@@ -138,7 +151,7 @@ fn char_slice_to_isize(data: &[char]) -> Option<isize> {
 
     for i in it {
         p -= 1;
-        if i.is_digit(10) {
+        if u8_is_digit(i) {
             ret += (i.to_owned() as isize - 48) * 10_isize.pow(p);
         } else {
             return None;
@@ -154,12 +167,12 @@ fn char_slice_to_isize(data: &[char]) -> Option<isize> {
 
 /// String "5:hello" -> "hello"
 fn decode_string(ctx: &mut DecodeContext) -> BtResult<String> {
-    if ctx.peek().map(|x| x.is_digit(10)) != Some(true) {
+    if ctx.peek().map(|x| u8_is_digit(x)) != Some(true) {
         bail!(BtError::InvalidString(ctx.pos()))
     }
 
     let col_idx = ctx
-        .position(':')
+        .position(b':')
         .context("failed to find the end of length of string")?;
     let string_len = ctx
         .advance_many(col_idx)
@@ -171,17 +184,18 @@ fn decode_string(ctx: &mut DecodeContext) -> BtResult<String> {
         .advance_many(string_len)
         .with_context(|| format!("string idx {} out of range", string_len))?
         .iter()
+        .map(|x| x.to_owned() as char)
         .collect::<String>();
     Ok(s.to_owned())
 }
 
 /// Interger "i52e" -> 52; "i-52e" -> -52
 fn decode_integer(ctx: &mut DecodeContext) -> BtResult<isize> {
-    if ctx.peek() != Some(&'i') {
+    if ctx.peek() != Some(&b'i') {
         bail!(BtError::InvalidInterger(ctx.pos()))
     }
 
-    let interger_end_pos = ctx.position('e').unwrap();
+    let interger_end_pos = ctx.position(b'e').unwrap();
     // When convert string to integer, do not include the trailing 'e'.
     ctx.advance();
     let number = ctx
@@ -201,7 +215,7 @@ fn decode_integer(ctx: &mut DecodeContext) -> BtResult<isize> {
 ///
 /// Returns a json array.
 fn decode_list(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
-    if ctx.peek() != Some(&'l') {
+    if ctx.peek() != Some(&b'l') {
         bail!(BtError::InvalidList(ctx.pos()))
     }
     // Pass the head of list "l".
@@ -211,7 +225,7 @@ fn decode_list(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
 
     loop {
         match ctx.peek() {
-            Some(v) if v == &'e' => break,
+            Some(b'e') => break,
             None => break,
             _ => { /* continue parsing list */ }
         }
@@ -233,7 +247,7 @@ fn decode_list(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
 ///
 /// Key must be string and sorted.
 fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
-    if ctx.peek() != Some(&'d') {
+    if ctx.peek() != Some(&b'd') {
         bail!(BtError::InvalidMap(ctx.pos()))
     }
     // Pass the heading "d".
@@ -249,7 +263,7 @@ fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
     let mut values = serde_json::Map::new();
     loop {
         match ctx.peek() {
-            Some(&'e') => break,
+            Some(&b'e') => break,
             None => break,
             _ => { /* Continue parsing map */ }
         }
@@ -276,15 +290,15 @@ fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
 
 fn decode_bencoded_value(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
     let flag = ctx.peek().context("reached the end of data")?;
-    if flag.is_digit(10) {
+    if u8_is_digit(flag) {
         let s = decode_string(ctx).context("failed to decode string")?;
         return Ok(serde_json::Value::String(s));
-    } else if flag == &'i' {
+    } else if flag == &b'i' {
         let n = decode_integer(ctx).context("failed to decode interger")?;
         return Ok(serde_json::Value::Number(Number::from(n)));
-    } else if flag == &'l' {
+    } else if flag == &b'l' {
         return decode_list(ctx);
-    } else if flag == &'d' {
+    } else if flag == &b'd' {
         return decode_dictionary(ctx);
     } else {
         panic!("unsupported format");
@@ -299,10 +313,30 @@ fn main() -> BtResult<()> {
     let command = &args[1];
 
     if command == "decode" {
-        let encoded_value = &args[2];
-        let mut ctx = DecodeContext::new(&encoded_value);
+        let mut ctx = DecodeContext::from(args[2].as_str());
         let decoded_value = decode_bencoded_value(&mut ctx)?;
         println!("{}", decoded_value.to_string());
+    } else if command == "info" {
+        let content =
+            std::fs::read(&args[2]).with_context(|| format!("failed to read file from"))?;
+        let mut ctx = DecodeContext::new(content);
+        let decoded_value = decode_bencoded_value(&mut ctx)?;
+        match decoded_value.as_object() {
+            None => {
+                println!("invalid info file map");
+                std::process::exit(1);
+            }
+            Some(v) => {
+                let announce = v.get("announce").and_then(|x| x.as_str()).unwrap();
+                let length = v
+                    .get("info")
+                    .and_then(|x| x.as_object())
+                    .and_then(|x| x.get("length"))
+                    .unwrap();
+                println!("Tracker URL: {announce}");
+                println!("Length: {length}");
+            }
+        }
     } else {
         println!("unknown command: {}", args[1])
     }
@@ -316,39 +350,39 @@ mod test {
 
     #[test]
     fn test_decode_integer() {
-        let v = decode_bencoded_value(&mut DecodeContext::new("i52e")).unwrap();
+        let v = decode_bencoded_value(&mut DecodeContext::from("i52e")).unwrap();
         assert_eq!(v.to_string(), String::from("52"));
 
-        let v2 = decode_bencoded_value(&mut DecodeContext::new("i-52e")).unwrap();
+        let v2 = decode_bencoded_value(&mut DecodeContext::from("i-52e")).unwrap();
         assert_eq!(v2.to_string(), String::from("-52"));
 
-        let v3 = decode_bencoded_value(&mut DecodeContext::new("i4294967300e")).unwrap();
+        let v3 = decode_bencoded_value(&mut DecodeContext::from("i4294967300e")).unwrap();
         assert_eq!(v3.to_string(), String::from("4294967300"));
     }
 
     #[test]
     fn test_decode_string() {
-        let v = decode_bencoded_value(&mut DecodeContext::new("5:hello")).unwrap();
+        let v = decode_bencoded_value(&mut DecodeContext::from("5:hello")).unwrap();
         assert_eq!(v.to_string(), String::from(r#""hello""#));
     }
 
     #[test]
     fn test_decode_list() {
-        let v = decode_bencoded_value(&mut DecodeContext::new("l5:mangoi921ee")).unwrap();
+        let v = decode_bencoded_value(&mut DecodeContext::from("l5:mangoi921ee")).unwrap();
         assert_eq!(v.to_string(), String::from(r#"["mango",921]"#));
-        let v2 = decode_bencoded_value(&mut DecodeContext::new("lli921e5:mangoee")).unwrap();
+        let v2 = decode_bencoded_value(&mut DecodeContext::from("lli921e5:mangoee")).unwrap();
         assert_eq!(v2.to_string(), String::from(r#"[[921,"mango"]]"#));
-        let v3 = decode_bencoded_value(&mut DecodeContext::new("lli4eei5ee")).unwrap();
+        let v3 = decode_bencoded_value(&mut DecodeContext::from("lli4eei5ee")).unwrap();
         assert_eq!(v3.to_string(), String::from(r"[[4],5]"));
     }
 
     #[test]
     fn test_decode_dictionary() {
-        let v = decode_bencoded_value(&mut DecodeContext::new("d3:foo3:bar5:helloi52ee")).unwrap();
+        let v = decode_bencoded_value(&mut DecodeContext::from("d3:foo3:bar5:helloi52ee")).unwrap();
         assert_eq!(v.to_string(), String::from(r#"{"foo":"bar","hello":52}"#));
-        let v2 = decode_bencoded_value(&mut DecodeContext::new("de")).unwrap();
+        let v2 = decode_bencoded_value(&mut DecodeContext::from("de")).unwrap();
         assert_eq!(v2.to_string(), String::from("{}"));
-        let v3 = decode_bencoded_value(&mut DecodeContext::new("d3:food3:foo3:bar5:helloi52eee"))
+        let v3 = decode_bencoded_value(&mut DecodeContext::from("d3:food3:foo3:bar5:helloi52eee"))
             .unwrap();
         assert_eq!(
             v3.to_string(),
