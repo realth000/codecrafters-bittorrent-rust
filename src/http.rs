@@ -97,6 +97,7 @@ impl<'de> Visitor<'de> for PeersVisitor {
             ip.push_str(vv[3].to_string().as_str());
             let port = u16::from_be_bytes([vv[4], vv[5]]);
             let peer = Peer { ip, port };
+            eprintln!(">>> raw={:?}, ip={}, port={}", vv, peer.ip, peer.port);
             peers.push(peer);
         }
 
