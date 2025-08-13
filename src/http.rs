@@ -80,6 +80,7 @@ impl<'de> Visitor<'de> for PeersVisitor {
         E: serde::de::Error,
     {
         if v.len() % 6 != 0 {
+            eprintln!(">>> v: {:?}, {}", v, v.len());
             return Err(E::custom(
                 "peer info bytes length is not multiple of 6 bytes",
             ));

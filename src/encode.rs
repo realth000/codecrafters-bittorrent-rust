@@ -72,7 +72,7 @@ pub fn encode_dictionary(ctx: &mut EncodeContext, v: &serde_json::Map<String, se
     ctx.push_char('d');
     for (k, v) in v.iter() {
         encode_string(ctx, k);
-        if k == "pieces" {
+        if ["pieces", "peers"].contains(&k.as_str()) {
             let bs = decode_bytes_from_string(v.as_str().unwrap());
             ctx.push_usize(bs.len());
             ctx.push_char(':');

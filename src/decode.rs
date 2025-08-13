@@ -214,7 +214,7 @@ fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
                 }
             }
             ParseState::Key(k) => {
-                if k == "pieces" {
+                if ["pieces", "peers"].contains(&k.as_str()) {
                     let value = decode_bytes(ctx)
                         .with_context(|| format!("failed to decode dictionary at {}", ctx.pos()))?;
                     values.insert(k, serde_json::Value::String(encode_bytes_to_string(&value)));
