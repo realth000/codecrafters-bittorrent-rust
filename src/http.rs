@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    ops::{Deref, DerefMut, Shl},
+    ops::{Deref, DerefMut},
     str::FromStr,
 };
 
@@ -80,7 +80,6 @@ impl<'de> Visitor<'de> for PeersVisitor {
         E: serde::de::Error,
     {
         if v.len() % 6 != 0 {
-            eprintln!(">>> v: {:?}, {}", v, v.len());
             return Err(E::custom(
                 "peer info bytes length is not multiple of 6 bytes",
             ));
@@ -96,8 +95,9 @@ impl<'de> Visitor<'de> for PeersVisitor {
             ip.push_str(vv[2].to_string().as_str());
             ip.push('.');
             ip.push_str(vv[3].to_string().as_str());
-            let port = (vv[4] as u16).shl(8) + (vv[5] as u16);
-            peers.push(Peer { ip, port });
+            let port = u16::from_be_bytes([vv[4], vv[5]]);
+            let peer = Peer { ip, port };
+            peers.push(peer);
         }
 
         Ok(Peers(peers))
