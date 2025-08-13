@@ -29,7 +29,7 @@ enum Command {
     Info(InfoArgs),
 
     #[command(about = "work on torrent file with other peers")]
-    Peer(PeerArgs),
+    Peers(PeersArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -39,7 +39,7 @@ struct DecodeArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-struct PeerArgs {
+struct PeersArgs {
     #[arg(help = "torrent file path")]
     file_path: String,
 }
@@ -64,7 +64,7 @@ async fn main() -> BtResult<()> {
             let torrent = Torrent::parse_from_file(info_args.file_path.as_str())?;
             torrent.print_info();
         }
-        Command::Peer(peer_args) => {
+        Command::Peers(peer_args) => {
             let torrent = Torrent::parse_from_file(peer_args.file_path.as_str())?;
             let peer_info = discover_peer(
                 torrent.tracker_url(),
@@ -88,7 +88,10 @@ mod test {
     use serde::{Deserialize, Serialize};
     use serde_bytes::ByteBuf;
 
-    use crate::{encode::encode_dictionary, utils::decode_bytes_from_string};
+    use crate::{
+        encode::{encode_dictionary, EncodeContext},
+        utils::decode_bytes_from_string,
+    };
 
     use super::*;
 
