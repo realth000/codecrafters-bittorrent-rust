@@ -69,9 +69,9 @@ async fn main() -> BtResult<()> {
             let peer_info = discover_peer(
                 torrent.tracker_url(),
                 torrent.info_hash(),
+                0,
+                0,
                 torrent.length(),
-                0,
-                0,
             )
             .await
             .context("failed to discover peer")?;

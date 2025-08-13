@@ -15,8 +15,9 @@ pub struct Torrent {
 
     info: TorrentInfo,
 
+    /// Byte arraym not hexed.
     #[serde(skip_serializing, skip_deserializing)]
-    info_hash: String,
+    info_hash: [u8; 20],
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -48,7 +49,7 @@ impl Torrent {
     pub fn print_info(&self) {
         println!("Tracker URL: {}", self.tracker_url);
         println!("Length: {}", self.info.length);
-        println!("Info Hash: {}", self.info_hash);
+        println!("Info Hash: {}", hex::encode(self.info_hash));
         println!("Piece Length: {}", self.info.piece_length);
         println!("Piece Hashs:");
         for ph in self.info.piece_hashes.iter() {
@@ -61,7 +62,7 @@ impl Torrent {
         &self.tracker_url
     }
 
-    pub fn info_hash(&self) -> &str {
+    pub fn info_hash(&self) -> &[u8; 20] {
         &self.info_hash
     }
 
@@ -80,12 +81,11 @@ impl TryFrom<serde_json::Value> for Torrent {
             .context("info map not found")?;
         let mut ctx = EncodeContext::new();
         encode_dictionary(&mut ctx, info_map);
-        let mut hasher = Sha1::new();
-        hasher.update(&ctx.data());
-        let info_hash = hex::encode(hasher.finalize());
 
         let mut torrent = serde_json::from_value::<Self>(value)?;
-        torrent.info_hash = info_hash;
+        let mut hasher = Sha1::new();
+        hasher.update(&ctx.data());
+        torrent.info_hash = hasher.finalize().try_into().unwrap();
 
         let mut piece_hashes = vec![];
         for p in torrent.info.pieces.as_bytes().chunks_exact(40) {
