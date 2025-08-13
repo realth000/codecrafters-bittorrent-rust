@@ -1,69 +1,85 @@
-use anyhow::{bail, Context};
-use sha1::{Digest, Sha1};
-use std::env;
+use anyhow::Context;
+use clap::{Args, Parser, Subcommand};
 
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
-    encode::{encode_dictionary, EncodeContext},
+    http::discover_peer,
+    torrent::Torrent,
     utils::BtResult,
 };
 
-mod client;
 mod decode;
 mod encode;
+mod http;
+mod torrent;
 mod utils;
 
-fn main() -> BtResult<()> {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        bail!("no args specified")
-    }
-    let command = &args[1];
+#[derive(Debug, Clone, Parser)]
+struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
 
-    if command == "decode" {
-        let mut ctx = DecodeContext::from(args[2].as_str());
-        let decoded_value = decode_bencoded_value(&mut ctx)?;
-        println!("{}", decoded_value.to_string());
-    } else if command == "info" {
-        let content =
-            std::fs::read(&args[2]).with_context(|| format!("failed to read file from"))?;
-        let mut ctx = DecodeContext::new(content);
-        let decoded_value = decode_bencoded_value(&mut ctx)?;
-        match decoded_value.as_object() {
-            None => {
-                println!("invalid info file map");
-                std::process::exit(1);
-            }
-            Some(v) => {
-                let announce = v.get("announce").and_then(|x| x.as_str()).unwrap();
-                let info_map = v.get("info").and_then(|x| x.as_object()).unwrap();
-                let length = info_map.get("length").and_then(|x| x.as_i64()).unwrap();
-                println!("Tracker URL: {announce}");
-                println!("Length: {length}");
+#[derive(Debug, Clone, Subcommand)]
+enum Command {
+    #[command(about = "decode bencode text data")]
+    Decode(DecodeArgs),
 
-                let mut ctx = EncodeContext::new();
-                encode_dictionary(&mut ctx, info_map);
-                let mut hasher = Sha1::new();
-                hasher.update(&ctx.data());
-                let hash = hex::encode(hasher.finalize());
-                println!("Info Hash: {hash}");
-                let piece_length = info_map
-                    .get("piece length")
-                    .and_then(|x| x.as_i64())
-                    .unwrap();
-                println!("Piece Length: {}", piece_length);
-                let pieces = info_map.get("pieces").and_then(|x| x.as_str()).unwrap();
-                println!("Piece Hashs:");
-                for p in pieces.as_bytes().chunks_exact(40) {
-                    let pstr = p.iter().map(|x| x.to_owned() as char).collect::<String>();
-                    println!("{}", pstr);
-                }
+    #[command(about = "print info in torrent file")]
+    Info(InfoArgs),
+
+    #[command(about = "work on torrent file with other peers")]
+    Peer(PeerArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct DecodeArgs {
+    #[arg(help = "text to decode")]
+    text: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PeerArgs {
+    #[arg(help = "torrent file path")]
+    file_path: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct InfoArgs {
+    #[arg(help = "torrent file path")]
+    file_path: String,
+}
+
+#[tokio::main]
+async fn main() -> BtResult<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Decode(decode_args) => {
+            let mut ctx = DecodeContext::from(decode_args.text.as_str());
+            let decoded_value = decode_bencoded_value(&mut ctx)?;
+            println!("{}", decoded_value.to_string());
+        }
+        Command::Info(info_args) => {
+            let torrent = Torrent::parse_from_file(info_args.file_path.as_str())?;
+            torrent.print_info();
+        }
+        Command::Peer(peer_args) => {
+            let torrent = Torrent::parse_from_file(peer_args.file_path.as_str())?;
+            let peer_info = discover_peer(
+                torrent.tracker_url(),
+                torrent.info_hash(),
+                torrent.length(),
+                0,
+                0,
+            )
+            .await
+            .context("failed to discover peer")?;
+            for peer in peer_info.peers.iter() {
+                println!("{}:{}", peer.ip, peer.port);
             }
         }
-    } else {
-        println!("unknown command: {}", args[1])
     }
-
     Ok(())
 }
 

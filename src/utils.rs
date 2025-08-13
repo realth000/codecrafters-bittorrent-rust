@@ -22,8 +22,14 @@ pub enum BtError {
     #[error("invalid key of map {1} at {0}")]
     InvalidMapKey(usize, serde_json::Value),
 
+    #[error("invalid json value")]
+    SerializationError(#[from] serde_json::Error),
+
     #[error("char {ch} not found from pos {pos}")]
     CharNotFound { pos: usize, ch: u8 },
+
+    #[error("http request failed with status code {0}")]
+    NetworkError(u16),
 }
 
 pub fn u8_is_digit(n: &u8) -> bool {
