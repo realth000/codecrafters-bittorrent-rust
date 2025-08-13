@@ -1,9 +1,10 @@
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
+use regex::Regex;
 
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
-    http::discover_peer,
+    http::{discover_peer, handshake, HandshakeMessage, PEER_ID},
     torrent::Torrent,
     utils::BtResult,
 };
@@ -30,6 +31,9 @@ enum Command {
 
     #[command(about = "work on torrent file with other peers")]
     Peers(PeersArgs),
+
+    #[command(about = "handshake with a target")]
+    Handshake(HandshakeArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -48,6 +52,35 @@ struct PeersArgs {
 struct InfoArgs {
     #[arg(help = "torrent file path")]
     file_path: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct HandshakeArgs {
+    #[arg(help = "torrent file path")]
+    file_path: String,
+
+    /// IP and port, joined by ':'.
+    #[arg(help = "ip and port to handshake, in format <ip>:<port>", value_parser=validate_ip_port)]
+    ip_port: (String, u16),
+}
+
+fn validate_ip_port(s: &str) -> Result<(String, u16), &'static str> {
+    match s.split_once(':') {
+        Some((ip, port)) => {
+            let ip_re = Regex::new(r#"^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$"#).unwrap();
+            if !ip_re.is_match(ip) {
+                return Err("invalid ip");
+            }
+            let port = if let Ok(p) = port.parse::<u16>() {
+                p
+            } else {
+                return Err("invalid port");
+            };
+
+            Ok((ip.to_string(), port))
+        }
+        None => Err("invalid ip port format, expected to be <ip>:<port>, e.g. 192.168.0.1:54321"),
+    }
 }
 
 #[tokio::main]
@@ -78,6 +111,25 @@ async fn main() -> BtResult<()> {
             for peer in peer_info.peers.iter() {
                 println!("{}:{}", peer.ip, peer.port);
             }
+        }
+        Command::Handshake(handshake_args) => {
+            println!(
+                ">>> {}, {:?}",
+                handshake_args.file_path, handshake_args.ip_port
+            );
+            let torrent = Torrent::parse_from_file(handshake_args.file_path.as_str())?;
+            let message = HandshakeMessage::new(
+                torrent.info_hash().clone(),
+                PEER_ID.as_bytes().try_into().unwrap(),
+            );
+            let resp = handshake(
+                handshake_args.ip_port.0.as_str(),
+                handshake_args.ip_port.1,
+                message,
+            )
+            .await
+            .context("handshake failed")?;
+            println!("Peer ID: {}", hex::encode(resp.peer_id));
         }
     }
     Ok(())
