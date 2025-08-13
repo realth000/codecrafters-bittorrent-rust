@@ -1,8 +1,11 @@
-use std::str::FromStr;
+use std::{
+    ops::{Deref, DerefMut},
+    str::FromStr,
+};
 
 use anyhow::{bail, Context};
 use reqwest::{StatusCode, Url};
-use serde::{de::Visitor, Deserialize, Serialize};
+use serde::{de::Visitor, Deserialize};
 
 use crate::utils::{BtError, BtResult};
 
@@ -12,46 +15,97 @@ const PEER_ID: &'static str = "l154rKqOHkfMLEGAecey";
 /// Port.
 const PORT: u16 = 6881;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
+pub struct Peers(Vec<Peer>);
+
+impl IntoIterator for Peers {
+    type Item = Peer;
+    type IntoIter = <Vec<Peer> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl Deref for Peers {
+    type Target = [Peer];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0[..]
+    }
+}
+
+impl DerefMut for Peers {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0[..]
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct PeerInfo {
     pub interval: usize,
-    pub peers: Vec<Peer>,
+    pub peers: Peers,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Peer {
     pub ip: String,
-    pub port: usize,
+    pub port: u16,
 }
 
-struct PeerVisitor;
+struct PeersVisitor;
 
-impl<'de> Visitor<'de> for PeerVisitor {
-    type Value = Peer;
+impl<'de> Deserialize<'de> for Peers {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(PeersVisitor)
+    }
+}
+
+impl<'de> Visitor<'de> for PeersVisitor {
+    type Value = Peers;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("peer info string with 4 bytes IP addr and 2 bytes port number")
+        formatter.write_str("bytes array with length multiple of 6 bytes")
     }
 
-    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
     where
         E: serde::de::Error,
     {
-        let bytes = v.bytes();
-        if bytes.len() == 6 {
-            Ok(Self::Value {
-                ip: String::from_utf8(bytes.clone().take(4).collect()).unwrap(),
-                port: String::from_utf8(bytes.skip(4).collect())
-                    .unwrap()
-                    .parse()
-                    .unwrap(),
-            })
-        } else {
-            Err(E::custom(format!(
-                "peer info string expected to have a 6 bytes length, actually got {}",
-                bytes.len()
-            )))
+        if v.len() % 6 != 0 {
+            return Err(E::custom(
+                "peer info bytes length is not multiple of 6 bytes",
+            ));
         }
+
+        let mut peers = vec![];
+        for vv in v.chunks_exact(6) {
+            let mut ip = Vec::with_capacity(8);
+            ip.push(vv[0]);
+            ip.push(b'.');
+            ip.push(vv[1]);
+            ip.push(b'.');
+            ip.push(vv[2]);
+            ip.push(b'.');
+            ip.push(vv[3]);
+            let port = (vv[4] as u16) << 8 + (vv[5] as u16);
+            peers.push(Peer {
+                ip: String::from_utf8(ip).unwrap(),
+                port,
+            });
+        }
+
+        Ok(Peers(peers))
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_bytes(v.as_slice())
     }
 }
 
@@ -80,13 +134,4 @@ pub async fn discover_peer(
             serde_json::from_slice::<PeerInfo>(data.iter().as_slice())
                 .context("failed to deserialize peer info")
         })
-}
-
-impl<'de> Deserialize<'de> for Peer {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_str(PeerVisitor {})
-    }
 }
