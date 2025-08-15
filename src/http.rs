@@ -200,8 +200,11 @@ impl HandshakeMessage {
 
     pub fn from_bytes(buffer: &[u8]) -> Result<Self> {
         if buffer.len() != 1 + 19 + 8 + 20 + 20 {
-            println!(">>> {}", String::from_utf8_lossy(buffer));
-            bail!("invalid handshake message length: {}", buffer.len())
+            bail!(
+                "warning: invalid handshake message length: {}, data={:?}",
+                buffer.len(),
+                buffer,
+            )
         }
         const HEADER_LEN: usize = 1 + 19 + 8;
         // TODO: Check header.
@@ -384,13 +387,13 @@ mod piece_message {
             }
 
             // Do we need the length? buffer size is decided in the tcp layer.
-            let _length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            let length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
             match data[4] {
                 5 => Ok(Self::Bitfield),
                 2 => Ok(Self::Interested),
                 1 => Ok(Self::Unchoke),
                 6 => bail!("unexpected request message"),
-                7 => Self::piece_from_bytes(&data[5..]),
+                7 => Self::piece_from_bytes(&data[5..((length - 1) as usize + 5)]),
                 v => bail!("unknown message id {v}"),
             }
         }
@@ -399,7 +402,7 @@ mod piece_message {
         ///
         /// The data is the payload part of the message.
         fn piece_from_bytes(payload: &[u8]) -> BtResult<Self> {
-            if payload.len() <= 8 {
+            if payload.len() < 8 {
                 bail!("data too short for piece message: length={}", payload.len())
             }
 
@@ -437,34 +440,37 @@ pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -
     );
 
     println!(">>> handshake: ip={}, port={}", peer.ip, peer.port);
+    let handshake_message_bytes = message.to_bytes();
+    println!(">>> handshake request: {:?}", handshake_message_bytes);
 
     let mut socket = TcpStream::connect(format!("{}:{}", peer.ip, peer.port).as_str())
         .await
         .context("failed to dial")?;
     let (mut rd, mut wr) = socket.split();
-    if let Err(e) = wr.write_all(&message.to_bytes()).await {
+    if let Err(e) = wr.write_all(&handshake_message_bytes).await {
         bail!("failed to send handshake message: {e}")
     }
 
-    let mut msg_buf = vec![0; 256];
+    // Tempoary buffer.
+    let mut buf = [0u8; 2048];
 
-    let n = rd.read(&mut msg_buf).await?;
+    let n = rd.read(&mut buf).await?;
     if n == 0 {
         bail!("empty handshake message");
     }
     // Here we ignore the handshake returned.
-    let _ = HandshakeMessage::from_bytes(&msg_buf[0..n]).context("invalid resp message format")?;
+    let _ = HandshakeMessage::from_bytes(&buf[0..n]).context("invalid resp message format")?;
 
     println!(">>> wait for bitfield");
 
     /* Wait for Bitfield */
 
-    let n = rd.read(&mut msg_buf).await?;
+    let n = rd.read(&mut buf).await?;
     if n == 0 {
         bail!("empty bitfield message");
     }
 
-    match PieceMessage::from_bytes(&msg_buf[0..n])? {
+    match PieceMessage::from_bytes(&buf[0..n])? {
         PieceMessage::Bitfield => { /* Expected bitfield message */ }
         v => bail!("invalid bitfield message: id={}", v.id()),
     }
@@ -481,57 +487,122 @@ pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -
 
     /* Wait for Unchoke */
 
-    let n = rd.read(&mut msg_buf).await?;
+    let n = rd.read(&mut buf).await?;
     if n == 0 {
         bail!("empty bitfield message");
     }
 
-    match PieceMessage::from_bytes(&msg_buf[0..n])? {
+    match PieceMessage::from_bytes(&buf[0..n])? {
         PieceMessage::Unchoke => { /* Expected unchoke message */ }
         v => bail!("invalid unchoke message: id={}", v.id()),
     }
 
     println!(">>> requesting pieces.");
 
-    /* Send for each request */
-    torrent.length();
-    let piece_length = torrent.info.piece_length;
-
-    let block_count = piece_length / BLOCK_SIZE;
-    let last_block_size = piece_length % BLOCK_SIZE;
-
     // Download the first piece.
     // Request for the first piece.
-    wr.write(&PieceMessage::new_request(0, 0, BLOCK_SIZE as u32).to_bytes())
-        .await?;
-    let mut blk_buf = vec![0; BLOCK_SIZE * 2];
-    let n = rd.read(&mut blk_buf).await?;
-    if n == 0 {
-        bail!("empty piece message");
+
+    if std::fs::exists(&file_path).unwrap() {
+        std::fs::remove_file(&file_path).unwrap();
     }
 
     let mut output_file = OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        .append(true)
         .open(file_path)
         .context("failed to open the output file")?;
 
-    match PieceMessage::from_bytes(&blk_buf[0..n])? {
-        PieceMessage::Piece {
-            index,
-            begin,
-            block,
-        } => {
+    /* Send for each request */
+    let piece_length = torrent.info.piece_length;
+    let block_count = piece_length / BLOCK_SIZE;
+    let m = piece_length % BLOCK_SIZE;
+    // Last block size should be geater than zero.
+    // If piece is exactly divided into multiple BLOCK_SIZE, the size of last one is also BLOCK_SIZE.
+    let last_block_size = if m == 0 { BLOCK_SIZE } else { m };
+    println!(
+        ">>> piece_length={}, block_count={}, last_block_size={}",
+        piece_length, block_count, last_block_size
+    );
+
+    let piece_index = 0;
+    let mut block_index = 0;
+
+    loop {
+        if block_index > block_count - 1 {
+            break;
+        }
+        let curr_block_offset = block_index * BLOCK_SIZE;
+        let curr_block_size = if block_index < block_count - 1 {
+            BLOCK_SIZE
+        } else {
+            last_block_size
+        };
+
+        println!(
+            ">>> request: piece_index={}, block_index={}, block_offset={}, block_size={}",
+            piece_index, block_index, curr_block_offset, curr_block_size
+        );
+        wr.write(
+            &PieceMessage::new_request(
+                piece_index as u32,
+                curr_block_offset as u32,
+                curr_block_size as u32,
+            )
+            .to_bytes(),
+        )
+        .await?;
+
+        // Get all data for current block, it may be separated into different `read`s.
+        // That's why we need a loop.
+
+        // Record all bytes we read for current block.
+        // Read until the block >= total_size.
+        //
+        // The total size is geater than `curr_block_size` because we have extra sections on data.
+        let total_size = curr_block_size + 4 + 1 + 4 + 4;
+        let mut blk_buf = Vec::with_capacity(total_size);
+        loop {
+            let n = rd.read(&mut buf).await?;
+            if n == 0 {
+                println!(">>> empty data in socket, break");
+                break;
+            }
+            blk_buf.extend_from_slice(&buf);
+            if blk_buf.len() >= total_size {
+                println!(
+                    ">>> got engouth data for curren block: {} > {}",
+                    blk_buf.len(),
+                    total_size
+                );
+                break;
+            }
+        }
+
+        if blk_buf.len() > total_size {
             println!(
-                ">>> piece: index={}, begin={}, block_len={}",
+                ">>> more data received: {:?}",
+                &blk_buf[total_size..(std::cmp::min(total_size + 32, blk_buf.len()))]
+            );
+        }
+        match PieceMessage::from_bytes(&blk_buf[0..blk_buf.len()])? {
+            PieceMessage::Piece {
                 index,
                 begin,
-                block.len()
-            );
-            output_file.write(&block).unwrap();
+                block,
+            } => {
+                println!(
+                    ">>> piece: block_index={}: piece_index={}, begin={}, block_len={}",
+                    block_index,
+                    index,
+                    begin,
+                    block.len()
+                );
+                output_file.write(&block).unwrap();
+            }
+            v => bail!("invalid message: id={}", v.id()),
         }
-        v => bail!("invalid message: id={}", v.id()),
+        block_index += 1;
     }
 
     Ok(())
