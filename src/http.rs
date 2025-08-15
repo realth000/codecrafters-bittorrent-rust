@@ -424,6 +424,7 @@ mod piece_message {
             if payload.len() <= 8 {
                 bail!("data too short for piece message: length={}", payload.len())
             }
+            println!(">>> bytes: {}", String::from_utf8_lossy(&payload[8..32]));
 
             let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
@@ -441,14 +442,13 @@ mod piece_message {
 ///
 /// Steps:
 ///
-/// 1. Handshake.  /// 2. Wait for a `bitfield` message
+/// 1. Handshake.
+/// 2. Wait for a `bitfield` message.
 /// 3. Send an `interested` message.
 /// 4. Wait for an `unchoke` message.
 /// 5. Break the piece into blocks, each block is 16kb sized. For each block:
 ///   1. Send a `request` message for each block.
 ///   2. Wait for a `piece` message.
-///
-/// It will be much better if we control the request window size, buffer size with some Actor model stuff, but at least this works.
 pub async fn download_piece(
     torrent: &Torrent,
     peer: &Peer,
@@ -541,7 +541,7 @@ pub async fn download_piece(
         piece_length, block_count, last_block_size
     );
 
-    let mut piece_data = Vec::with_capacity(piece_length);
+    let mut piece_data = vec![];
     // Each piece is transfers as several blocks. The index of block defines the data position within piece.
     let mut block_index = 0;
 
@@ -595,16 +595,16 @@ pub async fn download_piece(
             PieceMessage::Piece {
                 index,
                 begin,
-                mut block,
+                block,
             } => {
                 println!(
-                    ">>> piece  : piece_index={}, block_index={}, begin={}, block_len={}",
+                    ">>> receive: piece_index={}, block_index={}, begin={}, block_len={}",
                     index,
                     block_index,
                     begin,
                     block.len()
                 );
-                piece_data.append(&mut block);
+                piece_data.extend_from_slice(&block);
             }
             v => bail!("invalid message: id={}", v.id()),
         }
@@ -621,9 +621,8 @@ pub async fn download_piece(
     output_file.write(&piece_data).await.unwrap();
 
     // Validate chksum.
-    let chk_data = std::fs::read(&file_path).unwrap();
     let mut hasher = Sha1::new();
-    hasher.update(&chk_data);
+    hasher.update(&piece_data);
     let raw_chksum: [u8; 20] = hasher.finalize().try_into().unwrap();
     let chksum = hex::encode(raw_chksum);
     let expected_chksum = &torrent.info.piece_hashes[piece_index];
