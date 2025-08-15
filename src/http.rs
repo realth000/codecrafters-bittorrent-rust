@@ -1,5 +1,7 @@
 use std::{
     borrow::Cow,
+    fs::OpenOptions,
+    io::Write,
     ops::{Deref, DerefMut},
     str::FromStr,
 };
@@ -424,6 +426,8 @@ mod piece_message {
 /// 5. Break the piece into blocks, each block is 16kb sized. For each block:
 ///   1. Send a `request` message for each block.
 ///   2. Wait for a `piece` message.
+///
+/// It will be much better if we control the request window size, buffer size with some Actor model stuff, but at least this works.
 pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -> BtResult<()> {
     /* Handshake */
 
@@ -506,6 +510,13 @@ pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -
         bail!("empty piece message");
     }
 
+    let mut output_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(file_path)
+        .context("failed to open the output file")?;
+
     match PieceMessage::from_bytes(&blk_buf[0..n])? {
         PieceMessage::Piece {
             index,
@@ -518,9 +529,10 @@ pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -
                 begin,
                 block.len()
             );
+            output_file.write(&block).unwrap();
         }
         v => bail!("invalid message: id={}", v.id()),
     }
 
-    unimplemented!()
+    Ok(())
 }
