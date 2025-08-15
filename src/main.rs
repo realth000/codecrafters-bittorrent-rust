@@ -76,7 +76,7 @@ struct DownloadPieceArgs {
     file_path: String,
 
     #[arg(help = "piece index")]
-    index: String,
+    index: usize,
 }
 
 fn validate_ip_port(s: &str) -> Result<(String, u16), &'static str> {
@@ -157,8 +157,14 @@ async fn main() -> BtResult<()> {
                 eprintln!("no peers found");
                 return Ok(());
             }
-            let peer = &peer_info.peers[0];
-            download_piece(&torrent, peer, download_piece_args.output).await?;
+            let peer = &peer_info.peers[1];
+            download_piece(
+                &torrent,
+                peer,
+                download_piece_args.output,
+                download_piece_args.index,
+            )
+            .await?;
         }
     }
     Ok(())

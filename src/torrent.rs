@@ -32,7 +32,7 @@ pub struct TorrentInfo {
     pieces: String,
 
     #[serde(skip_serializing, skip_deserializing)]
-    piece_hashes: Vec<Vec<u8>>,
+    pub piece_hashes: Vec<Vec<u8>>,
 }
 
 impl Torrent {

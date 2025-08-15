@@ -1,7 +1,5 @@
 use std::{
     borrow::Cow,
-    fs::OpenOptions,
-    io::Write,
     ops::{Deref, DerefMut},
     str::FromStr,
 };
@@ -9,7 +7,9 @@ use std::{
 use anyhow::{bail, Context, Result};
 use reqwest::{StatusCode, Url};
 use serde::{de::Visitor, Deserialize};
+use sha1::{Digest, Sha1};
 use tokio::{
+    fs::OpenOptions,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
@@ -347,8 +347,8 @@ mod piece_message {
         fn length(&self) -> usize {
             match self {
                 PieceMessage::Bitfield | PieceMessage::Interested | PieceMessage::Unchoke => 1,
-                PieceMessage::Request { .. } => 12,
-                PieceMessage::Piece { block, .. } => 8 + block.len(),
+                PieceMessage::Request { .. } => 13,
+                PieceMessage::Piece { block, .. } => 9 + block.len(),
             }
         }
 
@@ -386,14 +386,33 @@ mod piece_message {
                 bail!("data too short: length={}", data.len())
             }
 
-            // Do we need the length? buffer size is decided in the tcp layer.
             let length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            println!(">>> recv msg_id={}, length={}", &data[4], length);
+            // |--------|--|------------|
+            //   |       |           |
+            // length    id          payload
+            // (4 bytes) (1 byte)    (???)
+            //
+            // And the payload is:
+            //
+            // |--------|--------|------------------|
+            //   |         |           |
+            //   index    begin       block
+            //  (4 bytes) (4 bytes)   (<= BLOCK_SIZE bytes)
+            //
+            // Payload  = index + begin + block
+            // (length) =  4B   +  4B   + <=16384B
+            //
+            // `length` values is the sum length of `id` + `payload`.
+            // And in `payload`, `index` and `begin` are not part of block data.
+            //
+            // So the `length` is: 1(id) + 4(index) + 4(begin) + BLOCK_SIZE, usually 16394.
             match data[4] {
                 5 => Ok(Self::Bitfield),
                 2 => Ok(Self::Interested),
                 1 => Ok(Self::Unchoke),
                 6 => bail!("unexpected request message"),
-                7 => Self::piece_from_bytes(&data[5..((length - 1) as usize + 5)]),
+                7 => Self::piece_from_bytes(&data[5..(5 + (length - 1) as usize)]),
                 v => bail!("unknown message id {v}"),
             }
         }
@@ -402,11 +421,10 @@ mod piece_message {
         ///
         /// The data is the payload part of the message.
         fn piece_from_bytes(payload: &[u8]) -> BtResult<Self> {
-            if payload.len() < 8 {
+            if payload.len() <= 8 {
                 bail!("data too short for piece message: length={}", payload.len())
             }
 
-            // Length is 4 bytes long.
             let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
             let block = payload[8..].to_vec();
@@ -431,7 +449,12 @@ mod piece_message {
 ///   2. Wait for a `piece` message.
 ///
 /// It will be much better if we control the request window size, buffer size with some Actor model stuff, but at least this works.
-pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -> BtResult<()> {
+pub async fn download_piece(
+    torrent: &Torrent,
+    peer: &Peer,
+    file_path: String,
+    piece_index: usize,
+) -> BtResult<()> {
     /* Handshake */
 
     let message = HandshakeMessage::new(
@@ -506,13 +529,6 @@ pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -
         std::fs::remove_file(&file_path).unwrap();
     }
 
-    let mut output_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(file_path)
-        .context("failed to open the output file")?;
-
     /* Send for each request */
     let piece_length = torrent.info.piece_length;
     let block_count = piece_length / BLOCK_SIZE;
@@ -525,7 +541,8 @@ pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -
         piece_length, block_count, last_block_size
     );
 
-    let piece_index = 0;
+    let mut piece_data = Vec::with_capacity(piece_length);
+    // Each piece is transfers as several blocks. The index of block defines the data position within piece.
     let mut block_index = 0;
 
     loop {
@@ -570,40 +587,54 @@ pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -
             }
             blk_buf.extend_from_slice(&buf);
             if blk_buf.len() >= total_size {
-                println!(
-                    ">>> got engouth data for curren block: {} > {}",
-                    blk_buf.len(),
-                    total_size
-                );
                 break;
             }
         }
 
-        if blk_buf.len() > total_size {
-            println!(
-                ">>> more data received: {:?}",
-                &blk_buf[total_size..(std::cmp::min(total_size + 32, blk_buf.len()))]
-            );
-        }
         match PieceMessage::from_bytes(&blk_buf[0..blk_buf.len()])? {
             PieceMessage::Piece {
                 index,
                 begin,
-                block,
+                mut block,
             } => {
                 println!(
-                    ">>> piece: block_index={}: piece_index={}, begin={}, block_len={}",
-                    block_index,
+                    ">>> piece  : piece_index={}, block_index={}, begin={}, block_len={}",
                     index,
+                    block_index,
                     begin,
                     block.len()
                 );
-                output_file.write(&block).unwrap();
+                piece_data.append(&mut block);
             }
             v => bail!("invalid message: id={}", v.id()),
         }
         block_index += 1;
     }
+
+    let mut output_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open(&file_path)
+        .await
+        .context("failed to open the output file")?;
+    output_file.write(&piece_data).await.unwrap();
+
+    // Validate chksum.
+    let chk_data = std::fs::read(&file_path).unwrap();
+    let mut hasher = Sha1::new();
+    hasher.update(&chk_data);
+    let raw_chksum: [u8; 20] = hasher.finalize().try_into().unwrap();
+    let chksum = hex::encode(raw_chksum);
+    let expected_chksum = &torrent.info.piece_hashes[piece_index];
+    println!(
+        ">>> expect chksum: {}",
+        expected_chksum
+            .iter()
+            .map(|x| x.to_owned() as char)
+            .collect::<String>()
+    );
+    println!(">>> actual chksum: {}", chksum);
 
     Ok(())
 }
