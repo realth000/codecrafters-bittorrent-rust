@@ -13,7 +13,7 @@ pub struct Torrent {
     #[serde(rename = "announce")]
     tracker_url: String,
 
-    info: TorrentInfo,
+    pub info: TorrentInfo,
 
     /// Byte arraym not hexed.
     #[serde(skip_serializing, skip_deserializing)]
@@ -21,13 +21,13 @@ pub struct Torrent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct TorrentInfo {
+pub struct TorrentInfo {
     length: usize,
 
     name: String,
 
     #[serde(rename = "piece length")]
-    piece_length: usize,
+    pub piece_length: usize,
 
     pieces: String,
 

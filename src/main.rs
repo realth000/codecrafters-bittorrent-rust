@@ -4,7 +4,7 @@ use regex::Regex;
 
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
-    http::{discover_peer, handshake, HandshakeMessage, PEER_ID},
+    http::{discover_peer, download_piece, handshake, HandshakeMessage, PEER_ID},
     torrent::Torrent,
     utils::BtResult,
 };
@@ -34,6 +34,9 @@ enum Command {
 
     #[command(about = "handshake with a target")]
     Handshake(HandshakeArgs),
+
+    #[command(name = "download_piece", about = "download a piece of file")]
+    DownloadPiece(DownloadPieceArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -62,6 +65,18 @@ struct HandshakeArgs {
     /// IP and port, joined by ':'.
     #[arg(help = "ip and port to handshake, in format <ip>:<port>", value_parser=validate_ip_port)]
     ip_port: (String, u16),
+}
+
+#[derive(Debug, Clone, Args)]
+struct DownloadPieceArgs {
+    #[arg(short = 'o', long = "output", help = "path to save the piece of file")]
+    output: String,
+
+    #[arg(help = "torrent file path")]
+    file_path: String,
+
+    #[arg(help = "piece index")]
+    index: String,
 }
 
 fn validate_ip_port(s: &str) -> Result<(String, u16), &'static str> {
@@ -113,10 +128,6 @@ async fn main() -> BtResult<()> {
             }
         }
         Command::Handshake(handshake_args) => {
-            println!(
-                ">>> {}, {:?}",
-                handshake_args.file_path, handshake_args.ip_port
-            );
             let torrent = Torrent::parse_from_file(handshake_args.file_path.as_str())?;
             let message = HandshakeMessage::new(
                 torrent.info_hash().clone(),
@@ -130,6 +141,24 @@ async fn main() -> BtResult<()> {
             .await
             .context("handshake failed")?;
             println!("Peer ID: {}", hex::encode(resp.peer_id));
+        }
+        Command::DownloadPiece(download_piece_args) => {
+            let torrent = Torrent::parse_from_file(download_piece_args.file_path.as_str())?;
+            let peer_info = discover_peer(
+                torrent.tracker_url(),
+                torrent.info_hash(),
+                0,
+                0,
+                torrent.length(),
+            )
+            .await
+            .context("failed to discover peer")?;
+            if peer_info.peers.is_empty() {
+                eprintln!("no peers found");
+                return Ok(());
+            }
+            let peer = &peer_info.peers[0];
+            download_piece(&torrent, peer, download_piece_args.output).await?;
         }
     }
     Ok(())

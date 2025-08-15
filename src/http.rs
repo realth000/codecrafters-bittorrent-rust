@@ -14,6 +14,8 @@ use tokio::{
 
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
+    http::piece_message::PieceMessage,
+    torrent::Torrent,
     utils::{decode_bytes_from_string, BtError, BtResult},
 };
 
@@ -22,6 +24,10 @@ pub const PEER_ID: &'static str = "l154rKqOHkfMLEGAecey";
 
 /// Port.
 const PORT: &'static str = "6881";
+
+/// Size of each block in piece.
+/// 16 kb.
+const BLOCK_SIZE: usize = 16 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Peers(Vec<Peer>);
@@ -51,7 +57,9 @@ impl DerefMut for Peers {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PeerInfo {
+    #[allow(dead_code)]
     pub interval: usize,
+
     pub peers: Peers,
 }
 
@@ -190,6 +198,7 @@ impl HandshakeMessage {
 
     pub fn from_bytes(buffer: &[u8]) -> Result<Self> {
         if buffer.len() != 1 + 19 + 8 + 20 + 20 {
+            println!(">>> {}", String::from_utf8_lossy(buffer));
             bail!("invalid handshake message length: {}", buffer.len())
         }
         const HEADER_LEN: usize = 1 + 19 + 8;
@@ -246,4 +255,272 @@ pub async fn handshake(
     }
 
     bail!("empty responce");
+}
+
+mod piece_message {
+    use anyhow::bail;
+
+    use crate::utils::BtResult;
+
+    /// Different types of message when communicating piece download process.
+    ///
+    /// All types of `PieceMessage` have the same structure in order:
+    ///
+    /// * 4 bytes message length.
+    /// * 1 byte message id.
+    /// * message payload which occupies all remaining size.
+    ///   * Not all messages have payload, payload may have different
+    ///     sections that described by theirself's field.
+    pub(crate) enum PieceMessage {
+        /// Server returned message after handshake.
+        Bitfield,
+
+        /// Message sent to server.
+        Interested,
+
+        /// Server returns this message before we can make `Request`s.
+        Unchoke,
+
+        /// Request for a 16kb sized block data of the piece.
+        ///
+        /// Have payload.
+        Request {
+            /// Piece index, start from 0.
+            index: u32,
+
+            /// Byte offset in current piece, start from 0.
+            begin: u32,
+
+            /// Length of the block.
+            ///
+            /// Most blocks have 16kb data, the last one may have less than 16kb.
+            length: u32,
+        },
+
+        /// A block of data of the piece responeded by other peers.
+        ///
+        /// Each `Piece` message has is corresponding to a `Request` message.
+        ///
+        /// Have payload.
+        Piece {
+            /// Piece index, start from 0.
+            index: u32,
+
+            /// Byte offset in current piece, start from 0.
+            begin: u32,
+
+            /// Data.
+            ///
+            /// Usually 16kb as the `Request` requested for.
+            block: Vec<u8>,
+        },
+    }
+
+    impl PieceMessage {
+        pub fn new_interested() -> Self {
+            Self::Interested
+        }
+
+        pub fn new_request(piece_index: u32, block_offset: u32, length: u32) -> Self {
+            Self::Request {
+                index: piece_index,
+                begin: block_offset,
+                length,
+            }
+        }
+
+        pub const fn id(&self) -> u8 {
+            match self {
+                PieceMessage::Bitfield => 5,
+                PieceMessage::Interested => 2,
+                PieceMessage::Unchoke => 1,
+                PieceMessage::Request { .. } => 6,
+                PieceMessage::Piece { .. } => 7,
+            }
+        }
+
+        fn length(&self) -> usize {
+            match self {
+                PieceMessage::Bitfield | PieceMessage::Interested | PieceMessage::Unchoke => 1,
+                PieceMessage::Request { .. } => 12,
+                PieceMessage::Piece { block, .. } => 8 + block.len(),
+            }
+        }
+
+        pub(crate) fn to_bytes(&self) -> Vec<u8> {
+            let mut buffer = Vec::with_capacity(8);
+            buffer.extend_from_slice(&self.length().to_be_bytes());
+            buffer.push(self.id());
+            match self {
+                PieceMessage::Request {
+                    index,
+                    begin,
+                    length,
+                } => {
+                    buffer.extend_from_slice(&index.to_be_bytes());
+                    buffer.extend_from_slice(&begin.to_be_bytes());
+                    buffer.extend_from_slice(&length.to_be_bytes());
+                }
+                PieceMessage::Piece {
+                    index,
+                    begin,
+                    block,
+                } => {
+                    buffer.extend_from_slice(&index.to_be_bytes());
+                    buffer.extend_from_slice(&begin.to_be_bytes());
+                    buffer.extend_from_slice(block.as_slice());
+                }
+                _ => { /* Do nothing */ }
+            }
+            buffer
+        }
+
+        pub(crate) fn from_bytes(data: &[u8]) -> BtResult<Self> {
+            // 4 bytes length.
+            if data.len() < 4 {
+                bail!("data too short: length={}", data.len())
+            }
+
+            // Do we need the length? buffer size is decided in the tcp layer.
+            let _length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            match data[4] {
+                5 => Ok(Self::Bitfield),
+                2 => Ok(Self::Interested),
+                1 => Ok(Self::Unchoke),
+                6 => bail!("unexpected request message"),
+                7 => Self::piece_from_bytes(&data[5..]),
+                v => bail!("unknown message id {v}"),
+            }
+        }
+
+        /// Parse `PieceMessage::Piece` from bytes
+        ///
+        /// The data is the payload part of the message.
+        fn piece_from_bytes(payload: &[u8]) -> BtResult<Self> {
+            if payload.len() <= 8 {
+                bail!("data too short for piece message: length={}", payload.len())
+            }
+
+            // Length is 4 bytes long.
+            let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let block = payload[8..].to_vec();
+            Ok(Self::Piece {
+                index,
+                begin,
+                block,
+            })
+        }
+    }
+}
+
+/// Download a single piece.
+///
+/// Steps:
+///
+/// 1. Handshake.  /// 2. Wait for a `bitfield` message
+/// 3. Send an `interested` message.
+/// 4. Wait for an `unchoke` message.
+/// 5. Break the piece into blocks, each block is 16kb sized. For each block:
+///   1. Send a `request` message for each block.
+///   2. Wait for a `piece` message.
+pub async fn download_piece(torrent: &Torrent, peer: &Peer, file_path: String) -> BtResult<()> {
+    /* Handshake */
+
+    let message = HandshakeMessage::new(
+        torrent.info_hash().to_owned(),
+        PEER_ID.as_bytes().try_into().unwrap(),
+    );
+
+    println!(">>> handshake: ip={}, port={}", peer.ip, peer.port);
+
+    let mut socket = TcpStream::connect(format!("{}:{}", peer.ip, peer.port).as_str())
+        .await
+        .context("failed to dial")?;
+    let (mut rd, mut wr) = socket.split();
+    if let Err(e) = wr.write_all(&message.to_bytes()).await {
+        bail!("failed to send handshake message: {e}")
+    }
+
+    let mut msg_buf = vec![0; 256];
+
+    let n = rd.read(&mut msg_buf).await?;
+    if n == 0 {
+        bail!("empty handshake message");
+    }
+    // Here we ignore the handshake returned.
+    let _ = HandshakeMessage::from_bytes(&msg_buf[0..n]).context("invalid resp message format")?;
+
+    println!(">>> wait for bitfield");
+
+    /* Wait for Bitfield */
+
+    let n = rd.read(&mut msg_buf).await?;
+    if n == 0 {
+        bail!("empty bitfield message");
+    }
+
+    match PieceMessage::from_bytes(&msg_buf[0..n])? {
+        PieceMessage::Bitfield => { /* Expected bitfield message */ }
+        v => bail!("invalid bitfield message: id={}", v.id()),
+    }
+
+    println!(">>> send interested");
+
+    /* Send Interested */
+
+    wr.write(&PieceMessage::new_interested().to_bytes())
+        .await
+        .context("failed to write interested message")?;
+
+    println!(">>> waiting unchoke");
+
+    /* Wait for Unchoke */
+
+    let n = rd.read(&mut msg_buf).await?;
+    if n == 0 {
+        bail!("empty bitfield message");
+    }
+
+    match PieceMessage::from_bytes(&msg_buf[0..n])? {
+        PieceMessage::Unchoke => { /* Expected unchoke message */ }
+        v => bail!("invalid unchoke message: id={}", v.id()),
+    }
+
+    println!(">>> requesting pieces.");
+
+    /* Send for each request */
+    torrent.length();
+    let piece_length = torrent.info.piece_length;
+
+    let block_count = piece_length / BLOCK_SIZE;
+    let last_block_size = piece_length % BLOCK_SIZE;
+
+    // Download the first piece.
+    // Request for the first piece.
+    wr.write(&PieceMessage::new_request(0, 0, BLOCK_SIZE as u32).to_bytes())
+        .await?;
+    let mut blk_buf = vec![0; BLOCK_SIZE * 2];
+    let n = rd.read(&mut blk_buf).await?;
+    if n == 0 {
+        bail!("empty piece message");
+    }
+
+    match PieceMessage::from_bytes(&blk_buf[0..n])? {
+        PieceMessage::Piece {
+            index,
+            begin,
+            block,
+        } => {
+            println!(
+                ">>> piece: index={}, begin={}, block_len={}",
+                index,
+                begin,
+                block.len()
+            );
+        }
+        v => bail!("invalid message: id={}", v.id()),
+    }
+
+    unimplemented!()
 }
