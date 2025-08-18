@@ -192,11 +192,26 @@ pub struct HandshakeMessage {
 
     /// Peer id in byte array.
     pub peer_id: [u8; 20],
+
+    /// The bytes in extension
+    ext: Option<[u8; 8]>,
 }
 
 impl HandshakeMessage {
     pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
-        Self { info_hash, peer_id }
+        Self {
+            info_hash,
+            peer_id,
+            ext: None,
+        }
+    }
+
+    pub fn with_ext(info_hash: [u8; 20], peer_id: [u8; 20], ext: [u8; 8]) -> Self {
+        Self {
+            info_hash,
+            peer_id,
+            ext: Some(ext),
+        }
     }
 
     /// The fixed handshake message length.
@@ -204,8 +219,13 @@ impl HandshakeMessage {
         1 + 19 + 8 + 20 + 20
     }
 
+    /// The fixed handshake message length with extension added.
+    pub const fn ext_length() -> usize {
+        1 + 19 + 8 + 20 + 20 + 6
+    }
+
     pub fn from_bytes(buffer: &[u8]) -> Result<Self> {
-        if buffer.len() != Self::length() {
+        if buffer.len() != Self::length() && buffer.len() != Self::ext_length() {
             bail!(
                 "warning: invalid handshake message length: {}, data={:?}",
                 buffer.len(),
@@ -226,14 +246,22 @@ impl HandshakeMessage {
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
-        Ok(Self { info_hash, peer_id })
+        let ext = match &buffer[1 + 19..1 + 19 + 8] {
+            &[0, 0, 0, 0, 0, 0, 0, 0] => None,
+            v => Some(v.to_owned().try_into().unwrap()),
+        };
+        Ok(Self {
+            info_hash,
+            peer_id,
+            ext,
+        })
     }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::with_capacity(128);
         buffer.push(19);
         buffer.extend_from_slice(b"BitTorrent protocol");
-        buffer.extend_from_slice(&[0u8; 8]);
+        buffer.extend_from_slice(&self.ext.unwrap_or([0u8; 8]));
         buffer.extend_from_slice(self.info_hash.as_slice());
         buffer.extend_from_slice(self.peer_id.as_slice());
         buffer
@@ -724,32 +752,58 @@ async fn save_data_to_file(data: Vec<u8>, file_path: &str) -> BtResult<()> {
 
 /// Magnet handshake queries peer info from tracker and handshake with peer to get peer id.
 pub async fn magnet_handshake(magnet: &Magnet) -> BtResult<HandshakeMessage> {
-    let message = HandshakeMessage::new(magnet.info_hash, PEER_ID.as_bytes().try_into().unwrap());
-    let tracker_url = match &magnet.tracker_url {
-        Some(v) => v,
+    let mut tracker_url = match &magnet.tracker_url {
+        Some(v) => Url::parse(v).context("invalid url")?,
         None => bail!("tracker url not provided"),
     };
 
-    /* Handshake */
-
     println!(">>> magnet handshake: tracker={}", tracker_url);
-    let handshake_message_bytes = message.to_bytes();
-    // println!(">>> handshake request: {:?}", handshake_message_bytes);
+    tracker_url
+        .query_pairs_mut()
+        .encoding_override(Some(&|input| {
+            // Ref: https://app.codecrafters.io/courses/bittorrent/stages/fi9
+            if input == "{{info_hash}}" {
+                Cow::Owned(magnet.info_hash.to_vec())
+            } else {
+                Cow::Borrowed(input.as_bytes())
+            }
+        }))
+        .append_pair("info_hash", "{{info_hash}}")
+        .append_pair("uploaded", "0")
+        .append_pair("downloaded", "0")
+        .append_pair("left", "1")
+        .append_pair("compact", "1")
+        .append_pair("peer_id", PEER_ID)
+        .append_pair("port", PORT)
+        .finish();
 
-    let mut socket = TcpStream::connect(tracker_url.as_str())
+    let resp = reqwest::get(tracker_url)
         .await
-        .context("failed to dial")?;
-    let (mut rd, mut wr) = socket.split();
-    if let Err(e) = wr.write_all(&handshake_message_bytes).await {
-        bail!("failed to send handshake message: {e}")
+        .context("http request failed")?;
+    if resp.status() != StatusCode::OK {
+        bail!(BtError::NetworkError(resp.status().as_u16()))
     }
 
-    // Tempoary buffer.
-    let mut handshake_buf = vec![0u8; HandshakeMessage::length()];
-    rd.read_exact(&mut handshake_buf).await?;
-    // Here we ignore the handshake returned.
-    let resp =
-        HandshakeMessage::from_bytes(&handshake_buf).context("invalid resp message format")?;
+    let peer_info = resp
+        .bytes()
+        .await
+        .context("invalid resp data")
+        .and_then(|data| {
+            decode_bencoded_value(&mut DecodeContext::new(data.as_ref().to_vec()))
+                .context("bencode decode failed")
+        })
+        .and_then(|value| {
+            serde_json::from_value::<PeerInfo>(value).context("failed to deserialize peer info")
+        })?;
 
+    let peer = &peer_info.peers[0];
+    let message = HandshakeMessage::with_ext(
+        magnet.info_hash,
+        PEER_ID.as_bytes().try_into().unwrap(),
+        [0, 0, 0, 0, 0, 0x10, 0, 0],
+    );
+    let resp = handshake(&peer.ip, peer.port, message)
+        .await
+        .context("peer handshake failed")?;
     Ok(resp)
 }
