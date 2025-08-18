@@ -1,3 +1,6 @@
+use std::future::Future;
+
+use futures::StreamExt;
 use thiserror::Error;
 
 pub type BtResult<T> = anyhow::Result<T, anyhow::Error>;
@@ -88,4 +91,23 @@ pub fn decode_bytes_from_string(s: &str) -> Vec<u8> {
 
 pub fn encode_bytes_to_string(d: &Vec<u8>) -> String {
     hex::encode(d)
+}
+
+pub async fn parallel_future<T, U, W, V>(
+    task_source: T,
+    buffer_size: usize,
+    closure: U,
+) -> anyhow::Result<Vec<V>>
+where
+    T: Iterator,
+    U: FnMut(<T as Iterator>::Item) -> W,
+    W: Future<Output = anyhow::Result<V>> + Sized,
+{
+    let ret = futures::stream::iter(task_source.map(closure))
+        .buffered(buffer_size)
+        .collect::<Vec<anyhow::Result<V>>>()
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<Vec<V>>>()?;
+    Ok(ret)
 }

@@ -157,10 +157,9 @@ async fn main() -> BtResult<()> {
                 eprintln!("no peers found");
                 return Ok(());
             }
-            let peer = &peer_info.peers[1];
             download_piece(
                 &torrent,
-                peer,
+                &peer_info.peers,
                 download_piece_args.output,
                 download_piece_args.index,
             )

@@ -27,7 +27,7 @@ pub struct TorrentInfo {
     name: String,
 
     #[serde(rename = "piece length")]
-    pub piece_length: usize,
+    piece_length: usize,
 
     pieces: String,
 
@@ -68,6 +68,25 @@ impl Torrent {
 
     pub fn length(&self) -> usize {
         self.info.length
+    }
+
+    /// Get the length of piece specified by `piece_index`.
+    ///
+    /// Usually `piece_length` but the last may be less than that.
+    ///
+    /// Return `None` if `piece_index` if out of range.
+    pub fn piece_length(&self, piece_index: usize) -> Option<usize> {
+        let piece_count = self.info.piece_hashes.len();
+        // Out
+        if piece_index > piece_count - 1 {
+            return None;
+        }
+
+        if piece_index == piece_count - 1 {
+            return Some(self.length() % self.info.piece_length);
+        }
+
+        Some(self.info.piece_length)
     }
 }
 
