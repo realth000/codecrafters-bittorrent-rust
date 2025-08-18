@@ -5,6 +5,7 @@ use regex::Regex;
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
     http::{discover_peer, download_file, download_piece, handshake, HandshakeMessage, PEER_ID},
+    magnet::Magnet,
     torrent::Torrent,
     utils::BtResult,
 };
@@ -12,6 +13,7 @@ use crate::{
 mod decode;
 mod encode;
 mod http;
+mod magnet;
 mod torrent;
 mod utils;
 
@@ -40,6 +42,9 @@ enum Command {
 
     #[command(name = "download", about = "download whole file of torrent")]
     Download(DownloadArgs),
+
+    #[command(name = "magnet_parse", about = "parse info from magnet string")]
+    MagnetParse(MagnetParseArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -93,6 +98,12 @@ struct DownloadArgs {
 
     #[arg(help = "torrent file path")]
     file_path: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct MagnetParseArgs {
+    #[arg(help = "magnet string to parse")]
+    magnet_str: String,
 }
 
 fn validate_ip_port(s: &str) -> Result<(String, u16), &'static str> {
@@ -197,6 +208,11 @@ async fn main() -> BtResult<()> {
                 return Ok(());
             }
             download_file(&torrent, &peer_info.peers, download_args.output).await?;
+        }
+        Command::MagnetParse(magnet_parse_args) => {
+            let manget =
+                Magnet::new(&magnet_parse_args.magnet_str).context("invalid magset string")?;
+            manget.print_info();
         }
     }
     Ok(())
