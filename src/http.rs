@@ -474,6 +474,19 @@ pub async fn download_piece(
     file_path: String,
     piece_index: usize,
 ) -> BtResult<()> {
+    let conns = setup_connection(peers, torrent.info_hash())
+        .await
+        .context("failed to setup info hash")?;
+    let piece_data = download_piece_internal(torrent, &conns, piece_index).await?;
+    check_hash(&piece_data, &torrent.info.piece_hashes[piece_index]).context("")?;
+    save_data_to_file(piece_data, &file_path).await
+}
+
+async fn download_piece_internal(
+    torrent: &Torrent,
+    peer_connections: &Vec<Arc<Mutex<TcpStream>>>,
+    piece_index: usize,
+) -> BtResult<Vec<u8>> {
     let piece_length = torrent
         .piece_length(piece_index)
         .expect("piece index out of range");
@@ -483,21 +496,9 @@ pub async fn download_piece(
     // If piece is exactly divided into multiple BLOCK_SIZE, the size of last one is also BLOCK_SIZE.
     let last_block_size = if m == 0 { BLOCK_SIZE } else { m };
     println!(
-        ">>> piece_length={}, block_count={}, last_block_size={}",
-        piece_length, block_count, last_block_size
+        ">>> piece {}: piece_length={}, block_count={}, last_block_size={}",
+        piece_index, piece_length, block_count, last_block_size
     );
-
-    let info_hash = torrent.info_hash();
-
-    // Setup all connections.
-    let peer_connections = parallel_future(peers.iter(), 3, |peer| {
-        connect_peer(&peer, info_hash.clone())
-    })
-    .await
-    .context("failed to setup peer connections")?
-    .into_iter()
-    .map(|conn| Arc::new(Mutex::new(conn)))
-    .collect::<Vec<_>>();
 
     let mut tasks = vec![];
     for i in 0..block_count {
@@ -514,12 +515,6 @@ pub async fn download_piece(
         });
     }
 
-    // Download the first piece.
-    // Request for the first piece.
-    if std::fs::exists(&file_path).unwrap() {
-        std::fs::remove_file(&file_path).unwrap();
-    }
-
     println!(">>> parallel max size: {}", peer_connections.len());
     let mut data = parallel_future(tasks.into_iter(), peer_connections.len(), |task| {
         download_block(task)
@@ -527,37 +522,27 @@ pub async fn download_piece(
     .await?;
     data.sort_by(|x, y| x.block_index.cmp(&y.block_index));
 
-    let mut output_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(&file_path)
-        .await
-        .context("failed to open the output file")?;
-
-    // Validate chksum.
-    let mut hasher = Sha1::new();
-
-    for block_data in data.iter() {
-        output_file.write(&block_data.data).await.unwrap();
-        hasher.update(&block_data.data);
-    }
-
-    let raw_chksum: [u8; 20] = hasher.finalize().try_into().unwrap();
-    let chksum = hex::encode(raw_chksum);
-    let expected_chksum = &torrent.info.piece_hashes[piece_index];
-    println!(
-        ">>> expect chksum: {}",
-        expected_chksum
-            .iter()
-            .map(|x| x.to_owned() as char)
-            .collect::<String>()
-    );
-    println!(">>> actual chksum: {}", chksum);
-
-    Ok(())
+    Ok(data.into_iter().flat_map(|x| x.data).collect::<Vec<_>>())
 }
 
+/// Setup connections with all available peers.
+async fn setup_connection(
+    peers: &Peers,
+    info_hash: &[u8; 20],
+) -> BtResult<Vec<Arc<Mutex<TcpStream>>>> {
+    let conns = parallel_future(peers.iter(), 3, |peer| {
+        connect_peer(&peer, info_hash.clone())
+    })
+    .await
+    .context("failed to setup peer connections")?
+    .into_iter()
+    .map(|conn| Arc::new(Mutex::new(conn)))
+    .collect::<Vec<_>>();
+
+    Ok(conns)
+}
+
+/// Connect a single peer.
 async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
     /* Handshake */
 
@@ -631,7 +616,6 @@ async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
     println!(">>> {}: requesting pieces.", task.block_index);
     let mut socket = task.socket.lock().unwrap();
     let (mut rd, mut wr) = socket.split();
-    println!(">>> {}: **SOCKET LOCKED**", task.block_index);
 
     // Each piece is transfers as several blocks. The index of block defines the data position within piece.
     // let mut block_index = 0;
@@ -683,4 +667,70 @@ async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
         }
         v => bail!("{}: invalid message: id={}", task.block_index, v.id()),
     }
+}
+
+/// Download a whole file from torrent and save to `file_path`.
+pub async fn download_file(torrent: &Torrent, peers: &Peers, file_path: String) -> BtResult<()> {
+    let conns = setup_connection(peers, torrent.info_hash())
+        .await
+        .context("failed to setup info hash")?;
+
+    let mut file_data = vec![];
+    for (idx, piece_hash) in torrent.info.piece_hashes.iter().enumerate() {
+        println!(">>> downloading piece {idx}");
+        let mut piece_data = download_piece_internal(torrent, &conns, idx)
+            .await
+            .with_context(|| format!("failed to download piece {idx} in file"))?;
+        check_hash(&piece_data, &piece_hash)
+            .with_context(|| format!("piece {idx} hash mismatch"))?;
+        file_data.append(&mut piece_data);
+        println!(">>> downloaded piece {idx}, file_size={}", file_data.len());
+    }
+
+    save_data_to_file(file_data, &file_path).await
+}
+
+fn check_hash(data: &[u8], expected_chksum: &[u8]) -> BtResult<()> {
+    // Validate chksum.
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    let raw_chksum: [u8; 20] = hasher.finalize().try_into().unwrap();
+    let actual = hex::encode(raw_chksum);
+
+    let expect = expected_chksum
+        .iter()
+        .map(|x| x.to_owned() as char)
+        .collect::<String>();
+
+    if actual != expect {
+        Err(BtError::CheksumMismatchError {
+            expected: expect,
+            actually: actual,
+        }
+        .into())
+    } else {
+        Ok(())
+    }
+}
+
+async fn save_data_to_file(data: Vec<u8>, file_path: &str) -> BtResult<()> {
+    // Download the first piece.
+    // Request for the first piece.
+    if std::fs::exists(&file_path).unwrap() {
+        std::fs::remove_file(&file_path).unwrap();
+    }
+
+    let mut output_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open(file_path)
+        .await
+        .context("failed to open the output file")?;
+    output_file
+        .write(&data)
+        .await
+        .context("failed to save piece data")?;
+
+    Ok(())
 }

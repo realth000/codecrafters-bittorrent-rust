@@ -33,6 +33,9 @@ pub enum BtError {
 
     #[error("http request failed with status code {0}")]
     NetworkError(u16),
+
+    #[error("checksum mismatch: expected {expected}, actually {actually}")]
+    CheksumMismatchError { expected: String, actually: String },
 }
 
 pub fn u8_is_digit(n: &u8) -> bool {

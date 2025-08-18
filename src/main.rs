@@ -4,7 +4,7 @@ use regex::Regex;
 
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
-    http::{discover_peer, download_piece, handshake, HandshakeMessage, PEER_ID},
+    http::{discover_peer, download_file, download_piece, handshake, HandshakeMessage, PEER_ID},
     torrent::Torrent,
     utils::BtResult,
 };
@@ -37,6 +37,9 @@ enum Command {
 
     #[command(name = "download_piece", about = "download a piece of file")]
     DownloadPiece(DownloadPieceArgs),
+
+    #[command(name = "download", about = "download whole file of torrent")]
+    Download(DownloadArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -77,6 +80,19 @@ struct DownloadPieceArgs {
 
     #[arg(help = "piece index")]
     index: usize,
+}
+
+#[derive(Debug, Clone, Args)]
+struct DownloadArgs {
+    #[arg(
+        short = 'o',
+        long = "output",
+        help = "path to save the whole downloaded file"
+    )]
+    output: String,
+
+    #[arg(help = "torrent file path")]
+    file_path: String,
 }
 
 fn validate_ip_port(s: &str) -> Result<(String, u16), &'static str> {
@@ -164,6 +180,23 @@ async fn main() -> BtResult<()> {
                 download_piece_args.index,
             )
             .await?;
+        }
+        Command::Download(download_args) => {
+            let torrent = Torrent::parse_from_file(download_args.file_path.as_str())?;
+            let peer_info = discover_peer(
+                torrent.tracker_url(),
+                torrent.info_hash(),
+                0,
+                0,
+                torrent.length(),
+            )
+            .await
+            .context("failed to discover peer")?;
+            if peer_info.peers.is_empty() {
+                eprintln!("no peers found");
+                return Ok(());
+            }
+            download_file(&torrent, &peer_info.peers, download_args.output).await?;
         }
     }
     Ok(())
