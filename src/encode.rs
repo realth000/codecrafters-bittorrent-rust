@@ -31,6 +31,10 @@ impl EncodeContext {
     pub fn data(&self) -> &Vec<u8> {
         &self.data
     }
+
+    pub fn consume(self) -> Vec<u8> {
+        self.data
+    }
 }
 
 /// String "5:hello" -> "hello"

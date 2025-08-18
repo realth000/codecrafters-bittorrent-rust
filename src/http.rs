@@ -32,6 +32,8 @@ const PORT: &'static str = "6881";
 /// 16 kb.
 const BLOCK_SIZE: usize = 16 * 1024;
 
+const EXT_ID_MAP: [(&'static str, usize); 1] = [("ut_metadata", 1)];
+
 #[derive(Debug, Clone)]
 pub struct Peers(Vec<Peer>);
 
@@ -224,9 +226,13 @@ impl HandshakeMessage {
         1 + 19 + 8 + 20 + 20 + 6
     }
 
+    pub fn has_ext(&self) -> bool {
+        self.ext.is_some()
+    }
+
     pub fn from_bytes(buffer: &[u8]) -> Result<Self> {
         if buffer.len() != Self::length() && buffer.len() != Self::ext_length() {
-            bail!(
+            println!(
                 "warning: invalid handshake message length: {}, data={:?}",
                 buffer.len(),
                 buffer,
@@ -299,7 +305,10 @@ pub async fn handshake(
 mod piece_message {
     use anyhow::bail;
 
-    use crate::utils::BtResult;
+    use crate::{
+        encode::{encode_dictionary, EncodeContext},
+        utils::BtResult,
+    };
 
     /// Different types of message when communicating piece download process.
     ///
@@ -353,6 +362,12 @@ mod piece_message {
             /// Usually 16kb as the `Request` requested for.
             block: Vec<u8>,
         },
+
+        /// Extension handshake.
+        Extension {
+            /// Bencoded dictionary.
+            extensions: Vec<u8>,
+        },
     }
 
     impl PieceMessage {
@@ -368,6 +383,34 @@ mod piece_message {
             }
         }
 
+        pub fn new_extension(extensions: &[(&'static str, usize)]) -> Self {
+            // The inner dictionary, pairs of extension name and extension id.
+            let inner_dict = {
+                let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                for ext in extensions {
+                    m.insert(
+                        ext.0.to_string(),
+                        serde_json::Value::Number(
+                            serde_json::value::Number::from_i128(ext.1 as i128).unwrap(),
+                        ),
+                    );
+                }
+                m
+            };
+
+            // The outer dictionary, pairs of key "m" and inner dictionary
+            let outer_dict = {
+                let mut m: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                m.insert(String::from("m"), serde_json::Value::Object(inner_dict));
+                let mut ctx = EncodeContext::new();
+                encode_dictionary(&mut ctx, &m);
+                ctx.consume()
+            };
+            Self::Extension {
+                extensions: outer_dict,
+            }
+        }
+
         pub const fn id(&self) -> u8 {
             match self {
                 PieceMessage::Bitfield => 5,
@@ -375,14 +418,17 @@ mod piece_message {
                 PieceMessage::Unchoke => 1,
                 PieceMessage::Request { .. } => 6,
                 PieceMessage::Piece { .. } => 7,
+                PieceMessage::Extension { .. } => 20,
             }
         }
 
-        fn length(&self) -> usize {
+        /// The length of the message.
+        fn length(&self) -> u32 {
             match self {
                 PieceMessage::Bitfield | PieceMessage::Interested | PieceMessage::Unchoke => 1,
                 PieceMessage::Request { .. } => 13,
-                PieceMessage::Piece { block, .. } => 9 + block.len(),
+                PieceMessage::Piece { block, .. } => 9 + block.len() as u32,
+                PieceMessage::Extension { extensions } => 1 + 1 + extensions.len() as u32,
             }
         }
 
@@ -408,6 +454,12 @@ mod piece_message {
                     buffer.extend_from_slice(&index.to_be_bytes());
                     buffer.extend_from_slice(&begin.to_be_bytes());
                     buffer.extend_from_slice(block.as_slice());
+                }
+                PieceMessage::Extension { extensions } => {
+                    // Extension message id.
+                    buffer.push(b'\x00');
+                    // Extension message payload
+                    buffer.extend_from_slice(extensions.as_slice());
                 }
                 _ => { /* Do nothing */ }
             }
@@ -447,6 +499,7 @@ mod piece_message {
                 1 => Ok(Self::Unchoke),
                 6 => bail!("unexpected request message"),
                 7 => Self::piece_from_bytes(&data[5..(5 + (length - 1) as usize)]),
+                20 => Self::extension_from_bytes(&data[5..(5 + (length - 1) as usize)]),
                 v => bail!("unknown message id {v}"),
             }
         }
@@ -466,6 +519,17 @@ mod piece_message {
                 index,
                 begin,
                 block,
+            })
+        }
+
+        /// Parse `PieceMessage::Extension` from bytes.
+        fn extension_from_bytes(payload: &[u8]) -> BtResult<Self> {
+            if payload.len() < 1 {
+                bail!("data too short for piece message: length={}", payload.len())
+            }
+
+            Ok(Self::Extension {
+                extensions: payload.to_vec(),
             })
         }
     }
@@ -502,7 +566,7 @@ pub async fn download_piece(
     file_path: String,
     piece_index: usize,
 ) -> BtResult<()> {
-    let conns = setup_connection(peers, torrent.info_hash())
+    let conns = setup_connection(peers, torrent.info_hash(), false)
         .await
         .context("failed to setup info hash")?;
     let piece_data = download_piece_internal(torrent, &conns, piece_index).await?;
@@ -557,24 +621,37 @@ async fn download_piece_internal(
 async fn setup_connection(
     peers: &Peers,
     info_hash: &[u8; 20],
+    enable_ext: bool,
 ) -> BtResult<Vec<Arc<Mutex<TcpStream>>>> {
     let conns = parallel_future(peers.iter(), 3, |peer| {
-        connect_peer(&peer, info_hash.clone())
+        connect_peer(&peer, info_hash.clone(), enable_ext)
     })
     .await
     .context("failed to setup peer connections")?
     .into_iter()
-    .map(|conn| Arc::new(Mutex::new(conn)))
+    .map(|conn| Arc::new(Mutex::new(conn.1.unwrap())))
     .collect::<Vec<_>>();
 
     Ok(conns)
 }
 
 /// Connect a single peer.
-async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
+async fn connect_peer(
+    peer: &Peer,
+    info_hash: [u8; 20],
+    enable_ext: bool,
+) -> BtResult<(HandshakeMessage, Option<TcpStream>)> {
     /* Handshake */
 
-    let message = HandshakeMessage::new(info_hash, PEER_ID.as_bytes().try_into().unwrap());
+    let message = if enable_ext {
+        HandshakeMessage::with_ext(
+            info_hash,
+            PEER_ID.as_bytes().try_into().unwrap(),
+            [0, 0, 0, 0, 0, 0x10, 0, 0],
+        )
+    } else {
+        HandshakeMessage::new(info_hash, PEER_ID.as_bytes().try_into().unwrap())
+    };
 
     println!(">>> handshake: ip={}, port={}", peer.ip, peer.port);
     let handshake_message_bytes = message.to_bytes();
@@ -594,7 +671,8 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
     let mut handshake_buf = vec![0u8; HandshakeMessage::length()];
     rd.read_exact(&mut handshake_buf).await?;
     // Here we ignore the handshake returned.
-    let _ = HandshakeMessage::from_bytes(&handshake_buf).context("invalid resp message format")?;
+    let handshake_resp =
+        HandshakeMessage::from_bytes(&handshake_buf).context("invalid resp message format")?;
 
     // println!(">>> wait for bitfield");
 
@@ -608,6 +686,20 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
     match PieceMessage::from_bytes(&buf[0..n])? {
         PieceMessage::Bitfield => { /* Expected bitfield message */ }
         v => bail!("invalid bitfield message: id={}", v.id()),
+    }
+
+    // Only do the extension handshake if peer support.
+    if enable_ext && handshake_resp.has_ext() {
+        let bytes = PieceMessage::new_extension(&EXT_ID_MAP).to_bytes();
+        println!(">>> [ext] start handshake: {:?}", &bytes);
+        wr.write(&bytes)
+            .await
+            .context("failed to send extension message")?;
+        // println!(">>> [ext] waiting response");
+        // // Read the extension handshake response.
+        // let n = rd.read(&mut buf).await?;
+        // println!(">>> [ext] finish handshake, got: {:?}", &buf[0..n]);
+        return Ok((handshake_resp, None));
     }
 
     // println!(">>> send interested");
@@ -624,7 +716,7 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
 
     let n = rd.read(&mut buf).await?;
     if n == 0 {
-        bail!(" empty bitfield message");
+        bail!(" empty unchoke message");
     }
 
     match PieceMessage::from_bytes(&buf[0..n])? {
@@ -632,7 +724,7 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
         v => bail!("invalid unchoke message: id={}", v.id()),
     }
 
-    Ok(socket)
+    Ok((handshake_resp, Some(socket)))
 }
 
 /// Download the data of a block in piece.
@@ -675,18 +767,14 @@ async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
     rd.read_exact(&mut blk_buf).await?;
     // println!(">>> total_size={}, len={}", total_size, blk_buf.len());
     match PieceMessage::from_bytes(&blk_buf)? {
-        PieceMessage::Piece {
-            index,
-            begin,
-            block,
-        } => {
-            println!(
-                ">>> receive: piece_index={}, block_index={}, begin={}, block_len={}",
-                index,
-                task.block_index,
-                begin,
-                block.len()
-            );
+        PieceMessage::Piece { block, .. } => {
+            // println!(
+            //     ">>> receive: piece_index={}, block_index={}, begin={}, block_len={}",
+            //     index,
+            //     task.block_index,
+            //     begin,
+            //     block.len()
+            // );
             Ok(BlockTaskResult {
                 block_index: task.block_index,
                 data: block,
@@ -698,7 +786,7 @@ async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
 
 /// Download a whole file from torrent and save to `file_path`.
 pub async fn download_file(torrent: &Torrent, peers: &Peers, file_path: String) -> BtResult<()> {
-    let conns = setup_connection(peers, torrent.info_hash())
+    let conns = setup_connection(peers, torrent.info_hash(), false)
         .await
         .context("failed to setup info hash")?;
 
@@ -797,12 +885,7 @@ pub async fn magnet_handshake(magnet: &Magnet) -> BtResult<HandshakeMessage> {
         })?;
 
     let peer = &peer_info.peers[0];
-    let message = HandshakeMessage::with_ext(
-        magnet.info_hash,
-        PEER_ID.as_bytes().try_into().unwrap(),
-        [0, 0, 0, 0, 0, 0x10, 0, 0],
-    );
-    let resp = handshake(&peer.ip, peer.port, message)
+    let (resp, _) = connect_peer(peer, magnet.info_hash, true)
         .await
         .context("peer handshake failed")?;
     Ok(resp)
