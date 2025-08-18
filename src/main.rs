@@ -4,7 +4,10 @@ use regex::Regex;
 
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
-    http::{discover_peer, download_file, download_piece, handshake, HandshakeMessage, PEER_ID},
+    http::{
+        discover_peer, download_file, download_piece, handshake, magnet_handshake,
+        HandshakeMessage, PEER_ID,
+    },
     magnet::Magnet,
     torrent::Torrent,
     utils::BtResult,
@@ -45,6 +48,9 @@ enum Command {
 
     #[command(name = "magnet_parse", about = "parse info from magnet string")]
     MagnetParse(MagnetParseArgs),
+
+    #[command(name = "magnet_handshake", about = "parse info from magnet string")]
+    MangetHandshake(MagnetHandshakeArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -102,6 +108,12 @@ struct DownloadArgs {
 
 #[derive(Debug, Clone, Args)]
 struct MagnetParseArgs {
+    #[arg(help = "magnet string to parse")]
+    magnet_str: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct MagnetHandshakeArgs {
     #[arg(help = "magnet string to parse")]
     magnet_str: String,
 }
@@ -213,6 +225,12 @@ async fn main() -> BtResult<()> {
             let manget =
                 Magnet::new(&magnet_parse_args.magnet_str).context("invalid magset string")?;
             manget.print_info();
+        }
+        Command::MangetHandshake(magnet_handshake_args) => {
+            let magnet =
+                Magnet::new(&magnet_handshake_args.magnet_str).context("invalid magset string")?;
+            let resp = magnet_handshake(&magnet).await?;
+            println!("Peer ID: {}", hex::encode(resp.peer_id));
         }
     }
     Ok(())

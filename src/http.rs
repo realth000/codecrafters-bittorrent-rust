@@ -17,6 +17,7 @@ use tokio::{
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
     http::piece_message::PieceMessage,
+    magnet::Magnet,
     torrent::Torrent,
     utils::{decode_bytes_from_string, parallel_future, BtError, BtResult},
 };
@@ -620,10 +621,10 @@ async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
 
     let curr_block_offset = task.block_offset;
     let curr_block_size = task.block_size;
-    println!(
-        ">>> {} request: piece_index={}, block_index={}, block_offset={}, block_size={}",
-        task.block_index, task.piece_index, task.block_index, curr_block_offset, curr_block_size
-    );
+    // println!(
+    //     ">>> {} request: piece_index={}, block_index={}, block_offset={}, block_size={}",
+    //     task.block_index, task.piece_index, task.block_index, curr_block_offset, curr_block_size
+    // );
     wr.write(
         &PieceMessage::new_request(
             task.piece_index as u32,
@@ -719,4 +720,36 @@ async fn save_data_to_file(data: Vec<u8>, file_path: &str) -> BtResult<()> {
     }
     tokio::fs::write(file_path, data).await?;
     Ok(())
+}
+
+/// Magnet handshake queries peer info from tracker and handshake with peer to get peer id.
+pub async fn magnet_handshake(magnet: &Magnet) -> BtResult<HandshakeMessage> {
+    let message = HandshakeMessage::new(magnet.info_hash, PEER_ID.as_bytes().try_into().unwrap());
+    let tracker_url = match &magnet.tracker_url {
+        Some(v) => v,
+        None => bail!("tracker url not provided"),
+    };
+
+    /* Handshake */
+
+    println!(">>> magnet handshake: tracker={}", tracker_url);
+    let handshake_message_bytes = message.to_bytes();
+    // println!(">>> handshake request: {:?}", handshake_message_bytes);
+
+    let mut socket = TcpStream::connect(tracker_url.as_str())
+        .await
+        .context("failed to dial")?;
+    let (mut rd, mut wr) = socket.split();
+    if let Err(e) = wr.write_all(&handshake_message_bytes).await {
+        bail!("failed to send handshake message: {e}")
+    }
+
+    // Tempoary buffer.
+    let mut handshake_buf = vec![0u8; HandshakeMessage::length()];
+    rd.read_exact(&mut handshake_buf).await?;
+    // Here we ignore the handshake returned.
+    let resp =
+        HandshakeMessage::from_bytes(&handshake_buf).context("invalid resp message format")?;
+
+    Ok(resp)
 }
