@@ -10,7 +10,6 @@ use reqwest::{StatusCode, Url};
 use serde::{de::Visitor, Deserialize};
 use sha1::{Digest, Sha1};
 use tokio::{
-    fs::OpenOptions,
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
@@ -393,7 +392,7 @@ mod piece_message {
             }
 
             let length = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-            println!(">>> recv msg_id={}, length={}", &data[4], length);
+            // println!(">>> recv msg_id={}, length={}", &data[4], length);
             // |--------|--|------------|
             //   |       |           |
             // length    id          payload
@@ -515,7 +514,7 @@ async fn download_piece_internal(
         });
     }
 
-    println!(">>> parallel max size: {}", peer_connections.len());
+    // println!(">>> parallel max size: {}", peer_connections.len());
     let mut data = parallel_future(tasks.into_iter(), peer_connections.len(), |task| {
         download_block(task)
     })
@@ -550,7 +549,7 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
 
     println!(">>> handshake: ip={}, port={}", peer.ip, peer.port);
     let handshake_message_bytes = message.to_bytes();
-    println!(">>> handshake request: {:?}", handshake_message_bytes);
+    // println!(">>> handshake request: {:?}", handshake_message_bytes);
 
     let mut socket = TcpStream::connect(format!("{}:{}", peer.ip, peer.port).as_str())
         .await
@@ -568,7 +567,7 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
     // Here we ignore the handshake returned.
     let _ = HandshakeMessage::from_bytes(&handshake_buf).context("invalid resp message format")?;
 
-    println!(">>> wait for bitfield");
+    // println!(">>> wait for bitfield");
 
     /* Wait for Bitfield */
 
@@ -582,7 +581,7 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
         v => bail!("invalid bitfield message: id={}", v.id()),
     }
 
-    println!(">>> send interested");
+    // println!(">>> send interested");
 
     /* Send Interested */
 
@@ -590,7 +589,7 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
         .await
         .context("failed to write interested message")?;
 
-    println!(">>> waiting unchoke");
+    // println!(">>> waiting unchoke");
 
     /* Wait for Unchoke */
 
@@ -613,7 +612,6 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<TcpStream> {
 ///
 /// The block info is specified in `task` parameter.
 async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
-    println!(">>> {}: requesting pieces.", task.block_index);
     let mut socket = task.socket.lock().unwrap();
     let (mut rd, mut wr) = socket.split();
 
@@ -646,7 +644,7 @@ async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
     let total_size = curr_block_size + 4 + 1 + 4 + 4;
     let mut blk_buf = vec![0u8; total_size];
     rd.read_exact(&mut blk_buf).await?;
-    println!(">>> total_size={}, len={}", total_size, blk_buf.len());
+    // println!(">>> total_size={}, len={}", total_size, blk_buf.len());
     match PieceMessage::from_bytes(&blk_buf)? {
         PieceMessage::Piece {
             index,
@@ -719,18 +717,6 @@ async fn save_data_to_file(data: Vec<u8>, file_path: &str) -> BtResult<()> {
     if std::fs::exists(&file_path).unwrap() {
         std::fs::remove_file(&file_path).unwrap();
     }
-
-    let mut output_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(file_path)
-        .await
-        .context("failed to open the output file")?;
-    output_file
-        .write(&data)
-        .await
-        .context("failed to save piece data")?;
-
+    tokio::fs::write(file_path, data).await?;
     Ok(())
 }
