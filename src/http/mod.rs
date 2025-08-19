@@ -14,6 +14,9 @@ use tokio::{
     net::TcpStream,
 };
 
+mod magnet;
+mod torrent;
+
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
     http::piece_message::PieceMessage,
@@ -566,7 +569,7 @@ pub async fn download_piece(
     file_path: String,
     piece_index: usize,
 ) -> BtResult<()> {
-    let conns = setup_connection(peers, torrent.info_hash(), false)
+    let conns = self::torrent::setup_connection(peers, torrent.info_hash())
         .await
         .context("failed to setup info hash")?;
     let piece_data = download_piece_internal(torrent, &conns, piece_index).await?;
@@ -615,116 +618,6 @@ async fn download_piece_internal(
     data.sort_by(|x, y| x.block_index.cmp(&y.block_index));
 
     Ok(data.into_iter().flat_map(|x| x.data).collect::<Vec<_>>())
-}
-
-/// Setup connections with all available peers.
-async fn setup_connection(
-    peers: &Peers,
-    info_hash: &[u8; 20],
-    enable_ext: bool,
-) -> BtResult<Vec<Arc<Mutex<TcpStream>>>> {
-    let conns = parallel_future(peers.iter(), 3, |peer| {
-        connect_peer(&peer, info_hash.clone(), enable_ext)
-    })
-    .await
-    .context("failed to setup peer connections")?
-    .into_iter()
-    .map(|conn| Arc::new(Mutex::new(conn.1.unwrap())))
-    .collect::<Vec<_>>();
-
-    Ok(conns)
-}
-
-/// Connect a single peer.
-async fn connect_peer(
-    peer: &Peer,
-    info_hash: [u8; 20],
-    enable_ext: bool,
-) -> BtResult<(HandshakeMessage, Option<TcpStream>)> {
-    /* Handshake */
-
-    let message = if enable_ext {
-        HandshakeMessage::with_ext(
-            info_hash,
-            PEER_ID.as_bytes().try_into().unwrap(),
-            [0, 0, 0, 0, 0, 0x10, 0, 0],
-        )
-    } else {
-        HandshakeMessage::new(info_hash, PEER_ID.as_bytes().try_into().unwrap())
-    };
-
-    println!(">>> handshake: ip={}, port={}", peer.ip, peer.port);
-    let handshake_message_bytes = message.to_bytes();
-    // println!(">>> handshake request: {:?}", handshake_message_bytes);
-
-    let mut socket = TcpStream::connect(format!("{}:{}", peer.ip, peer.port).as_str())
-        .await
-        .context("failed to dial")?;
-    let (mut rd, mut wr) = socket.split();
-    if let Err(e) = wr.write_all(&handshake_message_bytes).await {
-        bail!("failed to send handshake message: {e}")
-    }
-
-    // Tempoary buffer.
-    let mut buf = [0u8; 2048];
-
-    let mut handshake_buf = vec![0u8; HandshakeMessage::length()];
-    rd.read_exact(&mut handshake_buf).await?;
-    // Here we ignore the handshake returned.
-    let handshake_resp =
-        HandshakeMessage::from_bytes(&handshake_buf).context("invalid resp message format")?;
-
-    // println!(">>> wait for bitfield");
-
-    /* Wait for Bitfield */
-
-    let n = rd.read(&mut buf).await?;
-    if n == 0 {
-        bail!("empty bitfield message");
-    }
-
-    match PieceMessage::from_bytes(&buf[0..n])? {
-        PieceMessage::Bitfield => { /* Expected bitfield message */ }
-        v => bail!("invalid bitfield message: id={}", v.id()),
-    }
-
-    // Only do the extension handshake if peer support.
-    if enable_ext && handshake_resp.has_ext() {
-        let bytes = PieceMessage::new_extension(&EXT_ID_MAP).to_bytes();
-        println!(">>> [ext] start handshake: {:?}", &bytes);
-        wr.write(&bytes)
-            .await
-            .context("failed to send extension message")?;
-        // println!(">>> [ext] waiting response");
-        // // Read the extension handshake response.
-        // let n = rd.read(&mut buf).await?;
-        // println!(">>> [ext] finish handshake, got: {:?}", &buf[0..n]);
-        return Ok((handshake_resp, None));
-    }
-
-    // println!(">>> send interested");
-
-    /* Send Interested */
-
-    wr.write(&PieceMessage::new_interested().to_bytes())
-        .await
-        .context("failed to write interested message")?;
-
-    // println!(">>> waiting unchoke");
-
-    /* Wait for Unchoke */
-
-    let n = rd.read(&mut buf).await?;
-    if n == 0 {
-        bail!(" empty unchoke message");
-    }
-
-    match PieceMessage::from_bytes(&buf[0..n])? {
-        PieceMessage::Unchoke => { /* Expected unchoke message */ }
-        v => bail!("invalid unchoke message: id={}", v.id()),
-    }
-
-    Ok((handshake_resp, Some(socket)))
 }
 
 /// Download the data of a block in piece.
@@ -786,7 +679,7 @@ async fn download_block(task: BlockTask) -> BtResult<BlockTaskResult> {
 
 /// Download a whole file from torrent and save to `file_path`.
 pub async fn download_file(torrent: &Torrent, peers: &Peers, file_path: String) -> BtResult<()> {
-    let conns = setup_connection(peers, torrent.info_hash(), false)
+    let conns = self::torrent::setup_connection(peers, torrent.info_hash())
         .await
         .context("failed to setup info hash")?;
 
@@ -840,53 +733,5 @@ async fn save_data_to_file(data: Vec<u8>, file_path: &str) -> BtResult<()> {
 
 /// Magnet handshake queries peer info from tracker and handshake with peer to get peer id.
 pub async fn magnet_handshake(magnet: &Magnet) -> BtResult<HandshakeMessage> {
-    let mut tracker_url = match &magnet.tracker_url {
-        Some(v) => Url::parse(v).context("invalid url")?,
-        None => bail!("tracker url not provided"),
-    };
-
-    println!(">>> magnet handshake: tracker={}", tracker_url);
-    tracker_url
-        .query_pairs_mut()
-        .encoding_override(Some(&|input| {
-            // Ref: https://app.codecrafters.io/courses/bittorrent/stages/fi9
-            if input == "{{info_hash}}" {
-                Cow::Owned(magnet.info_hash.to_vec())
-            } else {
-                Cow::Borrowed(input.as_bytes())
-            }
-        }))
-        .append_pair("info_hash", "{{info_hash}}")
-        .append_pair("uploaded", "0")
-        .append_pair("downloaded", "0")
-        .append_pair("left", "1")
-        .append_pair("compact", "1")
-        .append_pair("peer_id", PEER_ID)
-        .append_pair("port", PORT)
-        .finish();
-
-    let resp = reqwest::get(tracker_url)
-        .await
-        .context("http request failed")?;
-    if resp.status() != StatusCode::OK {
-        bail!(BtError::NetworkError(resp.status().as_u16()))
-    }
-
-    let peer_info = resp
-        .bytes()
-        .await
-        .context("invalid resp data")
-        .and_then(|data| {
-            decode_bencoded_value(&mut DecodeContext::new(data.as_ref().to_vec()))
-                .context("bencode decode failed")
-        })
-        .and_then(|value| {
-            serde_json::from_value::<PeerInfo>(value).context("failed to deserialize peer info")
-        })?;
-
-    let peer = &peer_info.peers[0];
-    let (resp, _) = connect_peer(peer, magnet.info_hash, true)
-        .await
-        .context("peer handshake failed")?;
-    Ok(resp)
+    self::magnet::handshake(magnet).await
 }
