@@ -230,7 +230,8 @@ async fn main() -> BtResult<()> {
             let magnet =
                 Magnet::new(&magnet_handshake_args.magnet_str).context("invalid magset string")?;
             let resp = magnet_handshake(&magnet).await?;
-            println!("Peer ID: {}", hex::encode(resp.peer_id));
+            println!("Peer ID: {}", hex::encode(resp.message.peer_id));
+            println!("Peer Metadata Extension ID: {}", resp.ut_metadata_id);
         }
     }
     Ok(())

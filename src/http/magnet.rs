@@ -15,8 +15,13 @@ use crate::{
 
 use super::{HandshakeMessage, Peer, PeerInfo, PieceMessage, EXT_ID_MAP, PEER_ID, PORT};
 
+pub struct MagnetHandshakeResult {
+    pub message: HandshakeMessage,
+    pub ut_metadata_id: u32,
+}
+
 /// Connect a single peer.
-async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<HandshakeMessage> {
+async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<MagnetHandshakeResult> {
     /* Handshake */
 
     let message = HandshakeMessage::with_ext(
@@ -50,12 +55,22 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<HandshakeMes
 
     /* Wait for Bitfield */
 
-    let n = rd.read(&mut buf).await?;
+    let mut bitfield_buf = [0u8; 5];
+    let n = rd.read_exact(&mut bitfield_buf).await?;
     if n == 0 {
         bail!("empty bitfield message");
     }
+    // Read the payload of bitfield so the reader is clean.
+    let l = u32::from_be_bytes([
+        bitfield_buf[0],
+        bitfield_buf[1],
+        bitfield_buf[2],
+        bitfield_buf[3],
+    ]) - 1;
+    let mut tmp_buf = vec![0u8; l as usize];
+    rd.read_exact(&mut tmp_buf).await?;
 
-    match PieceMessage::from_bytes(&buf[0..n])? {
+    match PieceMessage::from_bytes(&bitfield_buf)? {
         PieceMessage::Bitfield => { /* Expected bitfield message */ }
         v => bail!("invalid bitfield message: id={}", v.id()),
     }
@@ -74,11 +89,28 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<HandshakeMes
     // Read the extension handshake response.
     let n = rd.read(&mut buf).await?;
     println!(">>> [ext] finish handshake, got: {:?}", &buf[0..n]);
-    return Ok(handshake_resp);
+    match PieceMessage::from_bytes(&buf[0..n])? {
+        PieceMessage::Extension { extensions } => {
+            let mut ctx = DecodeContext::new(extensions[1..].to_vec());
+            let v = decode_bencoded_value(&mut ctx)
+                .context("failed to decode handshake response from bencode")?;
+            let outer_dict = v.as_object().unwrap();
+            let inner_dict = outer_dict.get("m").unwrap().as_object().unwrap();
+            let ut_metadata_id = inner_dict
+                .get("ut_metadata")
+                .and_then(|x| x.as_i64())
+                .context("invalid ut_metadata id")?;
+            Ok(MagnetHandshakeResult {
+                message: handshake_resp,
+                ut_metadata_id: ut_metadata_id as u32,
+            })
+        }
+        v => bail!(">>> [ext] unexpected handshake message id={}", v.id()),
+    }
 }
 
 /// Magnet handshake queries peer info from tracker and handshake with peer to get peer id.
-pub(super) async fn handshake(magnet: &Magnet) -> BtResult<HandshakeMessage> {
+pub(super) async fn handshake(magnet: &Magnet) -> BtResult<MagnetHandshakeResult> {
     let mut tracker_url = match &magnet.tracker_url {
         Some(v) => Url::parse(v).context("invalid url")?,
         None => bail!("tracker url not provided"),

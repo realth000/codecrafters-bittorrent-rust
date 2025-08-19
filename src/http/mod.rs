@@ -19,7 +19,7 @@ mod torrent;
 
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
-    http::piece_message::PieceMessage,
+    http::{magnet::MagnetHandshakeResult, piece_message::PieceMessage},
     magnet::Magnet,
     torrent::Torrent,
     utils::{decode_bytes_from_string, parallel_future, BtError, BtResult},
@@ -732,6 +732,6 @@ async fn save_data_to_file(data: Vec<u8>, file_path: &str) -> BtResult<()> {
 }
 
 /// Magnet handshake queries peer info from tracker and handshake with peer to get peer id.
-pub async fn magnet_handshake(magnet: &Magnet) -> BtResult<HandshakeMessage> {
+pub async fn magnet_handshake(magnet: &Magnet) -> BtResult<MagnetHandshakeResult> {
     self::magnet::handshake(magnet).await
 }
