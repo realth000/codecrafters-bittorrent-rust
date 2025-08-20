@@ -35,7 +35,8 @@ const PORT: &'static str = "6881";
 /// 16 kb.
 const BLOCK_SIZE: usize = 16 * 1024;
 
-const EXT_ID_MAP: [(&'static str, usize); 1] = [("ut_metadata", 1)];
+const EXT_METADATA_ID: usize = 1;
+const EXT_ID_MAP: [(&'static str, usize); 1] = [("ut_metadata", EXT_METADATA_ID)];
 
 #[derive(Debug, Clone)]
 pub struct Peers(Vec<Peer>);

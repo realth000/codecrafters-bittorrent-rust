@@ -160,7 +160,7 @@ fn decode_list(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
     loop {
         match ctx.peek() {
             Some(b'e') => break,
-            None => break,
+            None => bail!("invalid input: list not ended"),
             _ => { /* continue parsing list */ }
         }
 
@@ -198,7 +198,7 @@ fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
     loop {
         match ctx.peek() {
             Some(&b'e') => break,
-            None => break,
+            None => bail!("invalid input: dictionary not ended"),
             _ => { /* Continue parsing map */ }
         }
 
@@ -228,6 +228,7 @@ fn decode_dictionary(ctx: &mut DecodeContext) -> BtResult<serde_json::Value> {
             }
         }
     }
+    ctx.advance();
 
     let ret = serde_json::Value::Object(values);
     Ok(ret)

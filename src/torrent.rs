@@ -36,6 +36,35 @@ pub struct TorrentInfo {
 }
 
 impl Torrent {
+    pub fn new(tracker_url: String, mut info: TorrentInfo) -> BtResult<Torrent> {
+        let info_value = serde_json::to_value(&info).unwrap();
+        let mut ctx = EncodeContext::new();
+        encode_dictionary(&mut ctx, info_value.as_object().unwrap());
+        let mut hasher = Sha1::new();
+        hasher.update(&ctx.data());
+        let info_hash = hasher.finalize().try_into().unwrap();
+
+        let mut piece_hashes = vec![];
+        for p in info.pieces.as_bytes().chunks_exact(40) {
+            let pstr = p.iter().map(|x| x.to_owned() as char).collect::<String>();
+            piece_hashes.push(pstr);
+        }
+        info.piece_hashes = info
+            .pieces
+            .as_bytes()
+            .chunks_exact(40)
+            .map(|x| x.to_vec())
+            .collect();
+
+        let torrent = Self {
+            tracker_url,
+            info,
+            info_hash,
+        };
+
+        Ok(torrent)
+    }
+
     pub fn parse_from_file(file_path: &str) -> BtResult<Torrent> {
         let content =
             std::fs::read(file_path).with_context(|| format!("failed to read file from"))?;

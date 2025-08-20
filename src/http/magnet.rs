@@ -10,6 +10,7 @@ use tokio::{
 use crate::{
     decode::{decode_bencoded_value, DecodeContext},
     magnet::Magnet,
+    torrent::TorrentInfo,
     utils::{BtError, BtResult},
 };
 
@@ -18,15 +19,22 @@ use super::{HandshakeMessage, Peer, PeerInfo, PieceMessage, EXT_ID_MAP, PEER_ID,
 use self::metadata::MessageType;
 
 mod metadata {
+    use anyhow::{bail, Context};
     use serde_json::json;
 
-    use crate::encode::{encode_dictionary, EncodeContext};
+    use crate::{
+        decode::{decode_bencoded_value, DecodeContext},
+        encode::{encode_dictionary, EncodeContext},
+        http::EXT_METADATA_ID,
+        torrent::TorrentInfo,
+    };
 
     /// The message id follows BitTorrent protocol.
     ///
     /// For message implemented by extension, the value is always 20.
     const MESSAGE_ID: u8 = 20;
 
+    #[derive(Debug, PartialEq, Eq)]
     pub(super) enum MessageType {
         /// Requests a piece of metadata from the peer
         Request,
@@ -44,6 +52,19 @@ mod metadata {
                 MessageType::Request => 0,
                 MessageType::Data => 1,
                 MessageType::Reject => 2,
+            }
+        }
+    }
+
+    impl TryFrom<u8> for MessageType {
+        type Error = anyhow::Error;
+
+        fn try_from(value: u8) -> Result<Self, Self::Error> {
+            match value {
+                0 => Ok(Self::Request),
+                1 => Ok(Self::Data),
+                2 => Ok(Self::Reject),
+                v => bail!("invalid message type {v}"),
             }
         }
     }
@@ -87,12 +108,78 @@ mod metadata {
 
             buf
         }
+
+        /// Build a [`Message::Data`] from bytes with known length.
+        ///
+        /// * `length` is the length of `data`.
+        /// * `data` contains all data we need to build a `Message` and the length should be `length`.
+        pub(super) fn parse_torrent_data(length: u32, data: &[u8]) -> anyhow::Result<TorrentInfo> {
+            let length = length as usize;
+            if length < 3 {
+                bail!("too short message response, len={length}");
+            }
+
+            if data.len() != length {
+                bail!(
+                    "invalid bytes length, declared as {}, but got {}",
+                    length,
+                    data.len()
+                );
+            }
+
+            if data[0] != 20 {
+                bail!("expected extension piece message, got id {}", data[0])
+            }
+            let ext_id = data[1];
+            if ext_id as usize != EXT_METADATA_ID {
+                bail!("invalid metadata extension id, we have {EXT_METADATA_ID} but peer responded {ext_id}")
+            }
+            // In the response message, two dictionaries are joined together:
+            //
+            // * Info dictionary contains "msg_type", "piece", and "total_size" where "total_size"
+            //   is the length of second dictionary.
+            // * Metadata piece contents bencoded into dictionary.
+            //   * Tip in stage ns5: If metadata is larger than 16kb, you would need to request multiple
+            //     pieces, but for the purposes of this challenge there will only be one piece.
+            let mut tmp_buf = Vec::with_capacity(length - 2 + 2);
+            tmp_buf.push(b'l');
+            tmp_buf.append(&mut data[2..length].to_vec());
+            tmp_buf.push(b'e');
+            let mut ctx = DecodeContext::new(tmp_buf);
+            let data_value =
+                decode_bencoded_value(&mut ctx).context("failed to decode response")?;
+            let content_list = data_value.as_array().context("response is not an array")?;
+            // Info dictionary of metadata.
+            let info_dict = content_list[0]
+                .as_object()
+                .context("response is not a map")?;
+            let msg_type = MessageType::try_from(
+                info_dict
+                    .get("msg_type")
+                    .context("msg_type not found")?
+                    .as_number()
+                    .context("invalid msg_type")?
+                    .as_u64()
+                    .unwrap() as u8,
+            )?;
+            // Skip validating peice.
+            // Skip validating total_size: in the challenge metadata is small enough to send by only one piece.
+            if msg_type != MessageType::Data {
+                bail!("invalid data message id, got {:?}", msg_type)
+            }
+
+            let torrent_info: TorrentInfo = serde_json::from_value(content_list[1].to_owned())
+                .context("invalid torrent info")?;
+
+            Ok(torrent_info)
+        }
     }
 }
 
 pub struct MagnetHandshakeResult {
     pub message: HandshakeMessage,
     pub ut_metadata_id: u32,
+    pub torrent_info: Option<TorrentInfo>,
 }
 
 /// Connect a single peer.
@@ -179,6 +266,7 @@ async fn connect_peer(
                 .get("ut_metadata")
                 .and_then(|x| x.as_i64())
                 .context("invalid ut_metadata id")? as u8;
+            let torrent_info;
             if request_metadata {
                 println!(">>> [ext] send metadata request message");
                 let req = metadata::Message::new(ut_metadata_id, MessageType::Request);
@@ -187,10 +275,25 @@ async fn connect_peer(
                 wr.write(&req_bytes)
                     .await
                     .context("failed to send metadata request")?;
+                let resp_len = rd
+                    .read_u32()
+                    .await
+                    .context("failed to read response length")?;
+                let mut resp_buf = vec![0u8; resp_len as usize];
+                rd.read_exact(&mut resp_buf)
+                    .await
+                    .context("failed to read response")?;
+                torrent_info = Some(metadata::Message::parse_torrent_data(
+                    resp_len,
+                    resp_buf.as_slice(),
+                )?);
+            } else {
+                torrent_info = None;
             }
             Ok(MagnetHandshakeResult {
                 message: handshake_resp,
                 ut_metadata_id: ut_metadata_id as u32,
+                torrent_info,
             })
         }
         v => bail!(">>> [ext] unexpected handshake message id={}", v.id()),

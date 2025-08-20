@@ -249,8 +249,9 @@ async fn main() -> BtResult<()> {
             let magnet =
                 Magnet::new(&magnet_info_args.magnet_str).context("invalid magset string")?;
             let resp = magnet_handshake(&magnet, true).await?;
-            println!("Peer ID: {}", hex::encode(resp.message.peer_id));
-            println!("Peer Metadata Extension ID: {}", resp.ut_metadata_id);
+            let torrent = Torrent::new(magnet.tracker_url.unwrap(), resp.torrent_info.unwrap())
+                .context("failed to build torrent")?;
+            torrent.print_info();
         }
     }
     Ok(())
