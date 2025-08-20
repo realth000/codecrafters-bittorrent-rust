@@ -732,6 +732,9 @@ async fn save_data_to_file(data: Vec<u8>, file_path: &str) -> BtResult<()> {
 }
 
 /// Magnet handshake queries peer info from tracker and handshake with peer to get peer id.
-pub async fn magnet_handshake(magnet: &Magnet) -> BtResult<MagnetHandshakeResult> {
-    self::magnet::handshake(magnet).await
+pub async fn magnet_handshake(
+    magnet: &Magnet,
+    request_metadata: bool,
+) -> BtResult<MagnetHandshakeResult> {
+    self::magnet::handshake(magnet, request_metadata).await
 }

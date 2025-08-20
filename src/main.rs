@@ -46,11 +46,17 @@ enum Command {
     #[command(name = "download", about = "download whole file of torrent")]
     Download(DownloadArgs),
 
-    #[command(name = "magnet_parse", about = "parse info from magnet string")]
+    #[command(name = "magnet_parse", about = "parse info from magnet link")]
     MagnetParse(MagnetParseArgs),
 
-    #[command(name = "magnet_handshake", about = "parse info from magnet string")]
-    MangetHandshake(MagnetHandshakeArgs),
+    #[command(
+        name = "magnet_handshake",
+        about = "parse magnet link and handshake with available peers"
+    )]
+    MagnetHandshake(MagnetHandshakeArgs),
+
+    #[command(name = "magnet_info", about = "fetch info from magnet link")]
+    MagnetInfo(MagnetInfoArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -115,6 +121,12 @@ struct MagnetParseArgs {
 #[derive(Debug, Clone, Args)]
 struct MagnetHandshakeArgs {
     #[arg(help = "magnet string to parse")]
+    magnet_str: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct MagnetInfoArgs {
+    #[arg(help = "magnet string to fetch info")]
     magnet_str: String,
 }
 
@@ -226,10 +238,17 @@ async fn main() -> BtResult<()> {
                 Magnet::new(&magnet_parse_args.magnet_str).context("invalid magset string")?;
             manget.print_info();
         }
-        Command::MangetHandshake(magnet_handshake_args) => {
+        Command::MagnetHandshake(magnet_handshake_args) => {
             let magnet =
                 Magnet::new(&magnet_handshake_args.magnet_str).context("invalid magset string")?;
-            let resp = magnet_handshake(&magnet).await?;
+            let resp = magnet_handshake(&magnet, false).await?;
+            println!("Peer ID: {}", hex::encode(resp.message.peer_id));
+            println!("Peer Metadata Extension ID: {}", resp.ut_metadata_id);
+        }
+        Command::MagnetInfo(magnet_info_args) => {
+            let magnet =
+                Magnet::new(&magnet_info_args.magnet_str).context("invalid magset string")?;
+            let resp = magnet_handshake(&magnet, true).await?;
             println!("Peer ID: {}", hex::encode(resp.message.peer_id));
             println!("Peer Metadata Extension ID: {}", resp.ut_metadata_id);
         }

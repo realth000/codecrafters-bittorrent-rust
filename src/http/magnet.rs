@@ -15,13 +15,92 @@ use crate::{
 
 use super::{HandshakeMessage, Peer, PeerInfo, PieceMessage, EXT_ID_MAP, PEER_ID, PORT};
 
+use self::metadata::MessageType;
+
+mod metadata {
+    use serde_json::json;
+
+    use crate::encode::{encode_dictionary, EncodeContext};
+
+    /// The message id follows BitTorrent protocol.
+    ///
+    /// For message implemented by extension, the value is always 20.
+    const MESSAGE_ID: u8 = 20;
+
+    pub(super) enum MessageType {
+        /// Requests a piece of metadata from the peer
+        Request,
+
+        /// Sends a piece of metadata to the peer
+        Data,
+
+        /// Signals that the peer doesn't have the piece of metadata that was requested
+        Reject,
+    }
+
+    impl MessageType {
+        const fn id(&self) -> u8 {
+            match self {
+                MessageType::Request => 0,
+                MessageType::Data => 1,
+                MessageType::Reject => 2,
+            }
+        }
+    }
+
+    pub(super) struct Message {
+        /// The id of metadata extension, received from the other peer.
+        ext_id: u8,
+
+        /// Type of the message.
+        msg_type: MessageType,
+    }
+
+    impl Message {
+        pub(super) fn new(ext_id: u8, msg_type: MessageType) -> Self {
+            Self { ext_id, msg_type }
+        }
+
+        pub(super) fn to_bytes(&self) -> Vec<u8> {
+            let mut buf = vec![];
+
+            let dict = json!({
+                "msg_type": self.msg_type.id(),
+                "piece": 0,
+            });
+
+            let mut ctx = EncodeContext::new();
+            encode_dictionary(&mut ctx, &dict.as_object().unwrap());
+            let mut dict_bytes = ctx.consume();
+            // Add length.
+            // Length is 1(message id) + 1(extension message id) + dict_bytes.len()
+            buf.extend((1 + 1 + dict_bytes.len() as u32).to_be_bytes());
+
+            // Add message id.
+            buf.push(MESSAGE_ID);
+
+            // Add extension message id.
+            buf.push(self.ext_id);
+
+            // Add bencoded dictionay
+            buf.append(&mut dict_bytes);
+
+            buf
+        }
+    }
+}
+
 pub struct MagnetHandshakeResult {
     pub message: HandshakeMessage,
     pub ut_metadata_id: u32,
 }
 
 /// Connect a single peer.
-async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<MagnetHandshakeResult> {
+async fn connect_peer(
+    peer: &Peer,
+    info_hash: [u8; 20],
+    request_metadata: bool,
+) -> BtResult<MagnetHandshakeResult> {
     /* Handshake */
 
     let message = HandshakeMessage::with_ext(
@@ -99,7 +178,16 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<MagnetHandsh
             let ut_metadata_id = inner_dict
                 .get("ut_metadata")
                 .and_then(|x| x.as_i64())
-                .context("invalid ut_metadata id")?;
+                .context("invalid ut_metadata id")? as u8;
+            if request_metadata {
+                println!(">>> [ext] send metadata request message");
+                let req = metadata::Message::new(ut_metadata_id, MessageType::Request);
+                let req_bytes = req.to_bytes();
+                println!(">>> [ext] request: {:?}", req_bytes);
+                wr.write(&req_bytes)
+                    .await
+                    .context("failed to send metadata request")?;
+            }
             Ok(MagnetHandshakeResult {
                 message: handshake_resp,
                 ut_metadata_id: ut_metadata_id as u32,
@@ -110,7 +198,10 @@ async fn connect_peer(peer: &Peer, info_hash: [u8; 20]) -> BtResult<MagnetHandsh
 }
 
 /// Magnet handshake queries peer info from tracker and handshake with peer to get peer id.
-pub(super) async fn handshake(magnet: &Magnet) -> BtResult<MagnetHandshakeResult> {
+pub(super) async fn handshake(
+    magnet: &Magnet,
+    request_metadata: bool,
+) -> BtResult<MagnetHandshakeResult> {
     let mut tracker_url = match &magnet.tracker_url {
         Some(v) => Url::parse(v).context("invalid url")?,
         None => bail!("tracker url not provided"),
@@ -156,7 +247,7 @@ pub(super) async fn handshake(magnet: &Magnet) -> BtResult<MagnetHandshakeResult
         })?;
 
     let peer = &peer_info.peers[0];
-    let resp = connect_peer(peer, magnet.info_hash)
+    let resp = connect_peer(peer, magnet.info_hash, request_metadata)
         .await
         .context("peer handshake failed")?;
     Ok(resp)
