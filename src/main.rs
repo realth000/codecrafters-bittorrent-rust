@@ -63,6 +63,12 @@ enum Command {
         about = "download a speicified piece of file from magnet link"
     )]
     MagnetDownloadPiece(MagnetDownloadPieceArgs),
+
+    #[command(
+        name = "magnet_download",
+        about = "download the whole file from magnet link"
+    )]
+    MagnetDownload(MagnetDownloadArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -146,6 +152,19 @@ struct MagnetDownloadPieceArgs {
 
     #[arg(help = "piece index")]
     index: usize,
+}
+
+#[derive(Debug, Clone, Args)]
+struct MagnetDownloadArgs {
+    #[arg(
+        short = 'o',
+        long = "output",
+        help = "path to save the whole downloaded file"
+    )]
+    output: String,
+
+    #[arg(help = "magnet string to parse")]
+    magnet_str: String,
 }
 
 fn validate_ip_port(s: &str) -> Result<(String, u16), &'static str> {
@@ -290,6 +309,26 @@ async fn main() -> BtResult<()> {
                 return Ok(());
             }
             download_piece(&torrent, &peer_info.peers, args.output, args.index).await?;
+        }
+        Command::MagnetDownload(args) => {
+            let magnet = Magnet::new(&args.magnet_str).context("invalid magset string")?;
+            let resp = magnet_handshake(&magnet, true).await?;
+            let torrent = Torrent::new(magnet.tracker_url.unwrap(), resp.torrent_info.unwrap())
+                .context("failed to build torrent")?;
+            let peer_info = discover_peer(
+                torrent.tracker_url(),
+                torrent.info_hash(),
+                0,
+                0,
+                torrent.length(),
+            )
+            .await
+            .context("failed to discover peer")?;
+            if peer_info.peers.is_empty() {
+                eprintln!("no peers found");
+                return Ok(());
+            }
+            download_file(&torrent, &peer_info.peers, args.output).await?;
         }
     }
     Ok(())
